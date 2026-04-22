@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 use url::Url;
 use uuid::Uuid;
 
@@ -39,15 +39,6 @@ pub struct Connected {
     pub handle: ClientHandle,
     pub events: mpsc::Receiver<StreamEvent>,
     pub auth: AuthOkMsg,
-    /// Version drift warning if the daemon's `PROTOCOL_VERSION` does not match
-    /// [`codeoid_protocol::PROTOCOL_VERSION`]. `None` means aligned.
-    pub version_warning: Option<VersionDrift>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct VersionDrift {
-    pub client: u32,
-    pub daemon: Option<u32>,
 }
 
 /// Cheap-to-clone handle the TUI keeps around to make requests.
@@ -150,20 +141,19 @@ pub async fn connect(url: &str, token: &str) -> Result<Connected> {
     let mut read = read;
     let auth = await_auth_ok(&mut read).await?;
 
-    // Step 3: compute version drift.
-    let version_warning = match auth.protocol_version {
-        Some(v) if v == codeoid_protocol::PROTOCOL_VERSION => None,
-        other => Some(VersionDrift {
-            client: codeoid_protocol::PROTOCOL_VERSION,
-            daemon: other,
-        }),
-    };
-    if let Some(drift) = version_warning {
-        warn!(
-            client_version = drift.client,
-            daemon_version = ?drift.daemon,
-            "protocol version drift detected"
-        );
+    // Step 3: hard version check. Greenfield project — daemon and TUI are
+    // always deployed together. A mismatch is a misconfiguration, not a
+    // user-facing warning.
+    match auth.protocol_version {
+        Some(v) if v == codeoid_protocol::PROTOCOL_VERSION => {}
+        other => {
+            return Err(ClientError::AuthRejected(format!(
+                "protocol version mismatch: client speaks v{}, daemon speaks {:?}. \
+                 Deploy daemon and TUI from the same commit.",
+                codeoid_protocol::PROTOCOL_VERSION,
+                other
+            )));
+        }
     }
 
     // Step 4: wire up the live stream.
@@ -183,7 +173,6 @@ pub async fn connect(url: &str, token: &str) -> Result<Connected> {
         },
         events: ev_rx,
         auth,
-        version_warning,
     })
 }
 
@@ -254,13 +243,25 @@ fn spawn_reader(
             };
             match frame {
                 WsMessage::Text(t) => {
+                    trace!(bytes = t.len(), "ws recv text");
                     let msg: DaemonMessage = match serde_json::from_str(&t) {
                         Ok(m) => m,
                         Err(e) => {
-                            warn!(error = %e, "failed to parse daemon message; dropping");
+                            // Dropping on parse failure is a protocol
+                            // divergence — log the raw bytes so it's
+                            // debuggable via CODEOID_LOG_FILE. Cap the
+                            // preview so a huge scrollback replay doesn't
+                            // blow up the log.
+                            let preview: String = t.chars().take(800).collect();
+                            warn!(
+                                error = %e,
+                                preview = %preview,
+                                "daemon message failed to deserialize — DROPPED"
+                            );
                             continue;
                         }
                     };
+                    debug!(kind = daemon_kind(&msg), "daemon -> client");
                     route(&registry, &ev_tx, msg).await;
                 }
                 WsMessage::Close(_) => {
@@ -280,16 +281,19 @@ fn spawn_writer(write: WriteHalf, mut rx: mpsc::Receiver<Outbound>) -> JoinHandl
         while let Some(out) = rx.recv().await {
             match out {
                 Outbound::Message(m) => {
+                    let kind = client_kind(&m);
                     let payload = match serde_json::to_string(&m) {
                         Ok(s) => s,
                         Err(e) => {
-                            warn!(error = %e, "failed to serialize outbound message");
+                            warn!(error = %e, kind, "failed to serialize outbound message");
                             continue;
                         }
                     };
+                    debug!(kind, bytes = payload.len(), "client -> daemon");
+                    trace!(kind, %payload, "client -> daemon wire");
                     let mut w = write.lock().await;
                     if let Err(e) = w.send(WsMessage::Text(payload.into())).await {
-                        warn!(error = %e, "writer error — closing");
+                        warn!(error = %e, kind, "writer error — closing");
                         return;
                     }
                 }
@@ -314,17 +318,19 @@ async fn route(
             registry.complete(&request_id, RequestOutcome::Ok(data));
         }
         DaemonMessage::ResponseError {
-            request_id,
-            error,
+            ref request_id,
+            ref error,
             code,
         } => {
-            registry.complete(
-                &request_id,
-                RequestOutcome::Error {
-                    code,
-                    message: error,
-                },
-            );
+            let outcome = RequestOutcome::Error {
+                code,
+                message: error.clone(),
+            };
+            if !registry.complete(request_id, outcome) {
+                // No one was awaiting this id (fire-and-forget send). Surface
+                // the error to the app instead of dropping it.
+                let _ = ev_tx.send(StreamEvent::Daemon(msg)).await;
+            }
         }
         DaemonMessage::SessionListResult { .. }
         | DaemonMessage::SessionSearchResult { .. } => {
@@ -359,4 +365,40 @@ async fn route(
 // need both "forward" and "correlate" paths.
 fn clone_msg(msg: &DaemonMessage) -> DaemonMessage {
     msg.clone()
+}
+
+fn daemon_kind(msg: &DaemonMessage) -> &'static str {
+    match msg {
+        DaemonMessage::AuthOk(_) => "auth.ok",
+        DaemonMessage::ResponseOk { .. } => "response.ok",
+        DaemonMessage::ResponseError { .. } => "response.error",
+        DaemonMessage::SessionListResult { .. } => "session.list.result",
+        DaemonMessage::SessionMessage(_) => "session.message",
+        DaemonMessage::SessionMessageDelta(_) => "session.message.delta",
+        DaemonMessage::SessionStatusChange { .. } => "session.status_change",
+        DaemonMessage::SessionInfoUpdate { .. } => "session.info_update",
+        DaemonMessage::ScrollbackReplay { .. } => "scrollback.replay",
+        DaemonMessage::SessionSearchResult { .. } => "session.search.result",
+        DaemonMessage::Unknown => "unknown",
+    }
+}
+
+fn client_kind(msg: &ClientMessage) -> &'static str {
+    match msg {
+        ClientMessage::SessionCreate { .. } => "session.create",
+        ClientMessage::SessionList { .. } => "session.list",
+        ClientMessage::SessionAttach { .. } => "session.attach",
+        ClientMessage::SessionDetach { .. } => "session.detach",
+        ClientMessage::SessionSend { .. } => "session.send",
+        ClientMessage::SessionInterrupt { .. } => "session.interrupt",
+        ClientMessage::SessionApprove { .. } => "session.approve",
+        ClientMessage::SessionDestroy { .. } => "session.destroy",
+        ClientMessage::SessionSetMode { .. } => "session.set_mode",
+        ClientMessage::SessionPin { .. } => "session.pin",
+        ClientMessage::SessionUnpin { .. } => "session.unpin",
+        ClientMessage::SessionRotate { .. } => "session.rotate",
+        ClientMessage::SessionSearch { .. } => "session.search",
+        ClientMessage::SessionSetModel { .. } => "session.set_model",
+        ClientMessage::SessionRename { .. } => "session.rename",
+    }
 }

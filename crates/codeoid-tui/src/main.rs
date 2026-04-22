@@ -19,8 +19,7 @@ use std::io;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use codeoid_client::connect;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use codeoid_client::resolve_token;
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -38,9 +37,18 @@ struct Cli {
     #[arg(long, env = "CODEOID_URL", default_value = "ws://127.0.0.1:7400")]
     url: String,
 
-    /// ZeroID JWT for auth.
+    /// A ready-to-use ZeroID access token (JWT). Takes precedence over `--api-key`.
     #[arg(long, env = "CODEOID_TOKEN")]
-    token: String,
+    token: Option<String>,
+
+    /// ZeroID API key (prefix `zid_sk_`). If set, the client will exchange it
+    /// for an access token at `--zeroid-url` before connecting.
+    #[arg(long, env = "CODEOID_API_KEY")]
+    api_key: Option<String>,
+
+    /// ZeroID base URL, used when exchanging an API key for a token.
+    #[arg(long, env = "ZEROID_URL", default_value = "http://localhost:8899")]
+    zeroid_url: String,
 
     /// Path to write a file log (tracing). Stderr is reserved for the TUI.
     #[arg(long, env = "CODEOID_LOG_FILE")]
@@ -52,12 +60,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.log_file.as_deref())?;
 
-    let connected = connect(&cli.url, &cli.token)
+    let token = resolve_token(cli.token.as_deref(), cli.api_key.as_deref(), &cli.zeroid_url)
         .await
-        .context("failed to connect to daemon")?;
+        .context("failed to resolve auth token")?;
 
     let mut terminal = setup_terminal()?;
-    let res = App::new(connected).run(&mut terminal).await;
+    let res = App::new(cli.url, token).run(&mut terminal).await;
     restore_terminal(&mut terminal)?;
     res
 }
@@ -95,18 +103,23 @@ fn init_tracing(log_file: Option<&std::path::Path>) -> Result<()> {
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // Intentionally NOT enabling mouse capture. Without it:
+    //   - Click-drag text selection (copy/paste) works natively.
+    //   - Most modern terminals (iTerm2, Alacritty, WezTerm, Kitty,
+    //     Ghostty) still emit wheel events as arrow-key escapes inside
+    //     the alternate screen, so scroll still functions — it just
+    //     routes via keyboard rather than mouse-routed events.
+    //
+    // If you need in-app mouse routing later, gate it behind a CLI flag
+    // so the default experience stays copy-paste friendly.
+    execute!(stdout, EnterAlternateScreen)?;
     let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     Ok(terminal)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
 }

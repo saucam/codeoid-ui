@@ -21,12 +21,6 @@ async fn main() -> anyhow::Result<()> {
         "connected as {} (scopes: {:?}) daemon_proto={:?}",
         conn.auth.identity.sub, conn.auth.scopes, conn.auth.protocol_version
     );
-    if let Some(drift) = conn.version_warning {
-        eprintln!(
-            "⚠️  protocol version drift: client={}, daemon={:?}",
-            drift.client, drift.daemon
-        );
-    }
 
     list_sessions(&conn.handle).await?;
     conn.handle.shutdown().await;

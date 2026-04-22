@@ -84,3 +84,132 @@ impl SessionList {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codeoid_protocol::SessionStatus;
+
+    fn mk(id: &str, name: &str) -> SessionInfo {
+        SessionInfo {
+            id: id.into(),
+            name: name.into(),
+            workdir: "/tmp".into(),
+            status: SessionStatus::Idle,
+            created_by: "me".into(),
+            created_at: "2026-04-22T00:00:00Z".into(),
+            attached_clients: 1,
+            mode: None,
+            turns_remaining: None,
+            pinned_files: None,
+            agent_uri: None,
+            subagents: None,
+            usage: None,
+            rotation: None,
+            queued_messages: None,
+            model: None,
+            fallback_model: None,
+        }
+    }
+
+    #[test]
+    fn replace_focuses_first_on_empty_start() {
+        let mut list = SessionList::default();
+        list.replace(vec![mk("a", "A"), mk("b", "B")]);
+        assert_eq!(list.focused_id(), Some("a"));
+    }
+
+    #[test]
+    fn replace_preserves_focus_by_id() {
+        let mut list = SessionList::default();
+        list.replace(vec![mk("a", "A"), mk("b", "B"), mk("c", "C")]);
+        list.focus_next(); // b
+        list.focus_next(); // c
+        assert_eq!(list.focused_id(), Some("c"));
+
+        // Daemon sends an updated list — focus should still land on "c".
+        list.replace(vec![mk("a", "A"), mk("c", "C"), mk("b", "B")]);
+        assert_eq!(list.focused_id(), Some("c"));
+    }
+
+    #[test]
+    fn replace_falls_back_to_first_when_focused_id_removed() {
+        let mut list = SessionList::default();
+        list.replace(vec![mk("a", "A"), mk("b", "B")]);
+        list.focus_id("b");
+        list.replace(vec![mk("a", "A"), mk("c", "C")]);
+        assert_eq!(list.focused_id(), Some("a"));
+    }
+
+    #[test]
+    fn replace_empties_focus_when_empty() {
+        let mut list = SessionList::default();
+        list.replace(vec![mk("a", "A")]);
+        list.replace(vec![]);
+        assert_eq!(list.focused_id(), None);
+    }
+
+    #[test]
+    fn upsert_replaces_matching_id() {
+        let mut list = SessionList::default();
+        list.upsert(mk("a", "Original"));
+        let mut updated = mk("a", "Renamed");
+        updated.status = SessionStatus::Working;
+        list.upsert(updated);
+        assert_eq!(list.items().len(), 1);
+        assert_eq!(list.items()[0].name, "Renamed");
+        assert!(matches!(list.items()[0].status, SessionStatus::Working));
+    }
+
+    #[test]
+    fn upsert_appends_and_focuses_when_list_was_empty() {
+        let mut list = SessionList::default();
+        list.upsert(mk("a", "A"));
+        assert_eq!(list.focused_id(), Some("a"));
+    }
+
+    #[test]
+    fn focus_next_wraps_around_end() {
+        let mut list = SessionList::default();
+        list.replace(vec![mk("a", "A"), mk("b", "B")]);
+        list.focus_next();
+        list.focus_next(); // wraps
+        assert_eq!(list.focused_id(), Some("a"));
+    }
+
+    #[test]
+    fn focus_prev_wraps_around_start() {
+        let mut list = SessionList::default();
+        list.replace(vec![mk("a", "A"), mk("b", "B"), mk("c", "C")]);
+        list.focus_prev();
+        assert_eq!(list.focused_id(), Some("c"));
+    }
+
+    #[test]
+    fn focus_next_on_empty_is_noop() {
+        let mut list = SessionList::default();
+        list.focus_next();
+        assert_eq!(list.focused_id(), None);
+    }
+
+    #[test]
+    fn remove_shifts_focus_when_current_is_removed() {
+        let mut list = SessionList::default();
+        list.replace(vec![mk("a", "A"), mk("b", "B"), mk("c", "C")]);
+        list.focus_id("c"); // last
+        list.remove("c");
+        assert_eq!(list.items().len(), 2);
+        // Previously-focused index (2) no longer exists — should clamp to
+        // the new last index (1).
+        assert_eq!(list.focused_index(), Some(1));
+        assert_eq!(list.focused_id(), Some("b"));
+    }
+
+    #[test]
+    fn remove_drops_focus_when_list_becomes_empty() {
+        let mut list = SessionList::default();
+        list.replace(vec![mk("a", "A")]);
+        list.remove("a");
+        assert_eq!(list.focused_id(), None);
+    }
+}

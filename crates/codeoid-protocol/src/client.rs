@@ -3,6 +3,14 @@
 //! Every request carries an `id` so the daemon's `response.ok` /
 //! `response.error` / `session.list.result` can be correlated back to the
 //! caller.
+//!
+//! # Wire-format notes
+//!
+//! The TS daemon expects `camelCase` fields (e.g. `sessionId`, `approvalId`).
+//! Every struct-like variant below gets a per-variant `rename_all = "camelCase"`
+//! so `session_id` serializes as `sessionId`, etc. `#[serde(rename_all)]` on
+//! the enum itself only affects variant names, not variant fields — hence
+//! the repetition.
 
 use serde::{Deserialize, Serialize};
 
@@ -10,25 +18,25 @@ use crate::session::SessionMode;
 
 /// Tagged union of every message a client can send the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type")]
 pub enum ClientMessage {
-    #[serde(rename = "session.create")]
+    #[serde(rename = "session.create", rename_all = "camelCase")]
     SessionCreate {
         id: String,
         name: String,
         workdir: String,
     },
 
-    #[serde(rename = "session.list")]
+    #[serde(rename = "session.list", rename_all = "camelCase")]
     SessionList { id: String },
 
-    #[serde(rename = "session.attach")]
+    #[serde(rename = "session.attach", rename_all = "camelCase")]
     SessionAttach { id: String, session_id: String },
 
-    #[serde(rename = "session.detach")]
+    #[serde(rename = "session.detach", rename_all = "camelCase")]
     SessionDetach { id: String, session_id: String },
 
-    #[serde(rename = "session.send")]
+    #[serde(rename = "session.send", rename_all = "camelCase")]
     SessionSend {
         id: String,
         session_id: String,
@@ -39,10 +47,10 @@ pub enum ClientMessage {
         priority: Option<SendPriority>,
     },
 
-    #[serde(rename = "session.interrupt")]
+    #[serde(rename = "session.interrupt", rename_all = "camelCase")]
     SessionInterrupt { id: String, session_id: String },
 
-    #[serde(rename = "session.approve")]
+    #[serde(rename = "session.approve", rename_all = "camelCase")]
     SessionApprove {
         id: String,
         session_id: String,
@@ -50,10 +58,10 @@ pub enum ClientMessage {
         approved: bool,
     },
 
-    #[serde(rename = "session.destroy")]
+    #[serde(rename = "session.destroy", rename_all = "camelCase")]
     SessionDestroy { id: String, session_id: String },
 
-    #[serde(rename = "session.set_mode")]
+    #[serde(rename = "session.set_mode", rename_all = "camelCase")]
     SessionSetMode {
         id: String,
         session_id: String,
@@ -62,24 +70,24 @@ pub enum ClientMessage {
         max_turns: Option<u32>,
     },
 
-    #[serde(rename = "session.pin")]
+    #[serde(rename = "session.pin", rename_all = "camelCase")]
     SessionPin {
         id: String,
         session_id: String,
         path: String,
     },
 
-    #[serde(rename = "session.unpin")]
+    #[serde(rename = "session.unpin", rename_all = "camelCase")]
     SessionUnpin {
         id: String,
         session_id: String,
         path: String,
     },
 
-    #[serde(rename = "session.rotate")]
+    #[serde(rename = "session.rotate", rename_all = "camelCase")]
     SessionRotate { id: String, session_id: String },
 
-    #[serde(rename = "session.search")]
+    #[serde(rename = "session.search", rename_all = "camelCase")]
     SessionSearch {
         id: String,
         query: String,
@@ -91,13 +99,20 @@ pub enum ClientMessage {
         limit: Option<u32>,
     },
 
-    #[serde(rename = "session.set_model")]
+    #[serde(rename = "session.set_model", rename_all = "camelCase")]
     SessionSetModel {
         id: String,
         session_id: String,
         model: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fallback_model: Option<Option<String>>,
+    },
+
+    #[serde(rename = "session.rename", rename_all = "camelCase")]
+    SessionRename {
+        id: String,
+        session_id: String,
+        name: String,
     },
 }
 
@@ -120,7 +135,8 @@ impl ClientMessage {
             | Self::SessionUnpin { id, .. }
             | Self::SessionRotate { id, .. }
             | Self::SessionSearch { id, .. }
-            | Self::SessionSetModel { id, .. } => id,
+            | Self::SessionSetModel { id, .. }
+            | Self::SessionRename { id, .. } => id,
         }
     }
 }

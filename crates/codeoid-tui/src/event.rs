@@ -16,6 +16,4 @@ pub enum AppEvent {
     Net(StreamEvent),
     /// Periodic tick — drives elapsed-time displays and redraws.
     Tick,
-    /// Clean shutdown requested by the app itself (quit keystroke, etc.).
-    Quit,
 }

@@ -73,19 +73,27 @@ The `codeoid-tui` binary drops into `target/release/codeoid-tui`.
 
 ## Running
 
+The daemon must already be running (`codeoid start`). The TUI authenticates
+the exact same way the TS `codeoid` CLI does — reading `CODEOID_API_KEY` and
+exchanging it with ZeroID for an access token on startup.
+
 ```bash
-# daemon must be running at ws://127.0.0.1:7400
-CODEOID_TOKEN=$(codeoid auth print-token) \
-  cargo run -p codeoid-tui --release
+# Most users — use the ZeroID API key you already have in your shell.
+cargo run -p codeoid-tui --release
+
+# Or bring your own JWT (skips the ZeroID exchange).
+CODEOID_TOKEN=eyJ... cargo run -p codeoid-tui --release
 ```
 
 Flags:
 
-| Flag            | Env                | Default                  | Meaning                          |
-|-----------------|--------------------|--------------------------|----------------------------------|
-| `--url`         | `CODEOID_URL`      | `ws://127.0.0.1:7400`    | Daemon WebSocket URL             |
-| `--token`       | `CODEOID_TOKEN`    | *(required)*             | ZeroID JWT                        |
-| `--log-file`    | `CODEOID_LOG_FILE` | *(none — logs dropped)*  | tracing file sink                 |
+| Flag            | Env                | Default                  | Meaning                                                |
+|-----------------|--------------------|--------------------------|--------------------------------------------------------|
+| `--url`         | `CODEOID_URL`      | `ws://127.0.0.1:7400`    | Daemon WebSocket URL                                   |
+| `--token`       | `CODEOID_TOKEN`    | *(none)*                 | Ready-to-use JWT. Takes precedence over `--api-key`.   |
+| `--api-key`     | `CODEOID_API_KEY`  | *(none)*                 | ZeroID API key (`zid_sk_...`). Exchanged at startup.   |
+| `--zeroid-url`  | `ZEROID_URL`       | `http://localhost:8899`  | ZeroID base URL for API-key exchange.                  |
+| `--log-file`    | `CODEOID_LOG_FILE` | *(none — logs dropped)*  | tracing file sink. Stderr is reserved for the TUI.     |
 
 ## Testing
 

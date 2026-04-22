@@ -4,6 +4,13 @@
 //! solicited responses (correlated by `request_id`) and unsolicited events
 //! (session messages, deltas, scrollback replay).
 //!
+//! # Wire format
+//!
+//! Per-variant `rename_all = "camelCase"` keeps field names in sync with
+//! the TS `protocol/types.ts` shape without relying on per-field
+//! `#[serde(rename = "…")]` hints. If you add a new variant, copy the
+//! attribute — the `wire_no_snake_case` test will fail CI otherwise.
+//!
 //! # Forward compatibility
 //!
 //! The trailing `Unknown` variant is a sink for any `type` field the daemon
@@ -23,25 +30,22 @@ pub enum DaemonMessage {
     #[serde(rename = "auth.ok")]
     AuthOk(AuthOkMsg),
 
-    #[serde(rename = "response.ok")]
+    #[serde(rename = "response.ok", rename_all = "camelCase")]
     ResponseOk {
-        #[serde(rename = "requestId")]
         request_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         data: Option<Value>,
     },
 
-    #[serde(rename = "response.error")]
+    #[serde(rename = "response.error", rename_all = "camelCase")]
     ResponseError {
-        #[serde(rename = "requestId")]
         request_id: String,
         error: String,
         code: ErrorCode,
     },
 
-    #[serde(rename = "session.list.result")]
+    #[serde(rename = "session.list.result", rename_all = "camelCase")]
     SessionListResult {
-        #[serde(rename = "requestId")]
         request_id: String,
         sessions: Vec<SessionInfo>,
     },
@@ -52,34 +56,30 @@ pub enum DaemonMessage {
     #[serde(rename = "session.message.delta")]
     SessionMessageDelta(SessionMessageDelta),
 
-    #[serde(rename = "session.status_change")]
+    #[serde(rename = "session.status_change", rename_all = "camelCase")]
     SessionStatusChange {
-        #[serde(rename = "sessionId")]
         session_id: String,
         status: SessionStatus,
         timestamp: String,
     },
 
-    #[serde(rename = "session.info_update")]
+    #[serde(rename = "session.info_update", rename_all = "camelCase")]
     SessionInfoUpdate {
         session: SessionInfo,
         timestamp: String,
     },
 
-    #[serde(rename = "scrollback.replay")]
+    #[serde(rename = "scrollback.replay", rename_all = "camelCase")]
     ScrollbackReplay {
-        #[serde(rename = "sessionId")]
         session_id: String,
         messages: Vec<SessionMessage>,
     },
 
-    #[serde(rename = "session.search.result")]
+    #[serde(rename = "session.search.result", rename_all = "camelCase")]
     SessionSearchResult {
-        #[serde(rename = "requestId")]
         request_id: String,
         query: String,
         sessions: Vec<SessionSearchHit>,
-        #[serde(rename = "workspaceId")]
         workspace_id: String,
         limit: u32,
     },

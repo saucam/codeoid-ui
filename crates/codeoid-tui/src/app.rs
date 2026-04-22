@@ -1,48 +1,55 @@
 //! The app reducer — owns `AppState`, drains the merged event stream, and
 //! hands the renderer a snapshot on each tick.
+//!
+//! Connection lifecycle is modelled explicitly: the outer loop handles
+//! connect + reconnect-with-backoff, the inner loop handles events for the
+//! currently-live connection. Dropping a connection transitions
+//! `AppState::connection` through `Reconnecting { attempt, next_attempt_in_secs }`
+//! so the status bar pills update visibly.
 
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::Result;
-use codeoid_client::{ClientHandle, Connected, StreamEvent};
-use codeoid_protocol::{ClientMessage, DaemonMessage};
+use anyhow::{anyhow, Context, Result};
+use codeoid_client::{connect, ClientHandle, Connected, StreamEvent};
+use codeoid_protocol::{ClientMessage, DaemonMessage, SessionMode};
 use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind};
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
-use tokio::time::interval;
+use tokio::time::{interval, sleep, Instant, Interval};
 use tracing::{debug, info, warn};
 
+use crate::commands::{self, SlashCommand};
 use crate::event::AppEvent;
 use crate::keymap::{resolve, Action};
-use crate::state::{AppState, Focus, Modal};
+use crate::state::{AppState, ConnectionState, Focus, Modal};
 use crate::ui;
 
 const TICK: Duration = Duration::from_millis(100);
 
+/// Reconnect budget. Beyond this we give up and surface a terminal error.
+const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+
 pub struct App {
-    state: AppState,
-    handle: ClientHandle,
-    daemon_events: mpsc::Receiver<StreamEvent>,
+    url: String,
+    token: String,
+    state: Option<AppState>,
+    handle: Option<ClientHandle>,
+    daemon_events: Option<mpsc::Receiver<StreamEvent>>,
     quit_requested: bool,
 }
 
 impl App {
     #[must_use]
-    pub fn new(connected: Connected) -> Self {
-        let mut state = AppState::new(connected.auth);
-        if let Some(drift) = connected.version_warning {
-            state.modal = Some(Modal::ProtocolDrift {
-                client: drift.client,
-                daemon: drift.daemon,
-            });
-        }
+    pub fn new(url: String, token: String) -> Self {
         Self {
-            state,
-            handle: connected.handle,
-            daemon_events: connected.events,
+            url,
+            token,
+            state: None,
+            handle: None,
+            daemon_events: None,
             quit_requested: false,
         }
     }
@@ -51,19 +58,75 @@ impl App {
         mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<()> {
-        // Kick off an initial session list so the tabs aren't empty.
-        let id = ClientHandle::next_request_id();
-        let _ = self
-            .handle
-            .send(ClientMessage::SessionList { id })
-            .await;
-
         let mut term_events = EventStream::new();
         let mut ticker = interval(TICK);
-        let started = Instant::now();
 
+        // Initial connect. If this fails we propagate so the user sees the
+        // real diagnostic (wrong token, wrong url) rather than landing in
+        // an empty TUI.
+        let connected = connect(&self.url, &self.token)
+            .await
+            .context("initial connect to daemon")?;
+        self.absorb_connection(connected);
+        self.on_connected().await;
+
+        'outer: loop {
+            // Run the event loop for the currently-live connection. It
+            // returns when we quit or when the connection drops.
+            let disconnected = self
+                .event_loop(terminal, &mut term_events, &mut ticker)
+                .await?;
+
+            if self.quit_requested {
+                break 'outer;
+            }
+
+            if !disconnected {
+                // Loop exited without a quit and without a disconnect —
+                // shouldn't happen, but be defensive.
+                break 'outer;
+            }
+
+            // Connection is gone. Attempt a bounded reconnect.
+            if let Err(fatal) = self.reconnect_with_backoff(terminal).await {
+                if let Some(state) = self.state.as_mut() {
+                    state.connection = ConnectionState::Failed {
+                        reason: fatal.to_string(),
+                    };
+                    state.record_error(format!("disconnected: {fatal}"));
+                    // One final draw so the user can read the failure.
+                    let state_mut: &mut AppState = state;
+                    terminal.draw(|f| ui::render(f, state_mut))?;
+                }
+                // Brief pause so the failure pill is legible.
+                sleep(Duration::from_secs(2)).await;
+                break 'outer;
+            }
+        }
+
+        if let Some(handle) = self.handle.as_ref() {
+            handle.shutdown().await;
+        }
+        Ok(())
+    }
+
+    /// Inner loop. Returns `Ok(true)` if the connection dropped (caller
+    /// should reconnect) and `Ok(false)` if we exited cleanly (quit).
+    async fn event_loop(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        term_events: &mut EventStream,
+        ticker: &mut Interval,
+    ) -> Result<bool> {
         loop {
-            terminal.draw(|f| ui::render(f, &self.state))?;
+            if let Some(state) = self.state.as_mut() {
+                terminal.draw(|f| ui::render(f, state))?;
+            }
+
+            let events = self
+                .daemon_events
+                .as_mut()
+                .ok_or_else(|| anyhow!("no daemon events channel"))?;
 
             let event = tokio::select! {
                 Some(ev) = term_events.next() => match ev {
@@ -73,97 +136,155 @@ impl App {
                         continue;
                     }
                 },
-                Some(ev) = self.daemon_events.recv() => AppEvent::Net(ev),
+                Some(ev) = events.recv() => AppEvent::Net(ev),
                 _ = ticker.tick() => AppEvent::Tick,
             };
 
-            self.update(event).await;
+            match &event {
+                AppEvent::Net(StreamEvent::Closed | StreamEvent::Errored(_)) => {
+                    // Surface the reason, then return up so reconnect can
+                    // take over.
+                    if let Some(state) = self.state.as_mut() {
+                        match &event {
+                            AppEvent::Net(StreamEvent::Closed) => {
+                                state.record_error("daemon closed the connection");
+                            }
+                            AppEvent::Net(StreamEvent::Errored(err)) => {
+                                state.record_error(format!("daemon error: {err}"));
+                            }
+                            _ => {}
+                        }
+                    }
+                    return Ok(true);
+                }
+                _ => {}
+            }
 
+            self.update(event).await;
             if self.quit_requested {
-                debug!(uptime_ms = ?started.elapsed().as_millis(), "quit requested");
-                self.handle.shutdown().await;
-                return Ok(());
+                return Ok(false);
             }
         }
     }
 
     async fn update(&mut self, event: AppEvent) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
         match event {
             AppEvent::Terminal(CtEvent::Key(key)) if key.kind == KeyEventKind::Press => {
-                let prompt_focused = self.state.focus == Focus::Prompt;
-                if let Some(action) = resolve(key, prompt_focused) {
+                let prompt_focused = state.focus == Focus::Prompt;
+                let modal_open = state.modal.is_some();
+                let command_mode = state.is_command_mode();
+                if let Some(action) = resolve(key, prompt_focused, modal_open, command_mode) {
                     self.apply_action(action).await;
-                } else if prompt_focused {
-                    if let crossterm::event::KeyCode::Char(c) = key.code {
-                        self.state.prompt_buffer.push(c);
-                    } else if matches!(key.code, crossterm::event::KeyCode::Backspace) {
-                        self.state.prompt_buffer.pop();
-                    }
+                } else if prompt_focused && !modal_open {
+                    // Anything keymap didn't handle goes straight to the
+                    // TextArea — arrows, Home/End, Ctrl+A/E, word-delete,
+                    // selection, paste, the lot.
+                    state.prompt.input(key);
                 }
-            }
-            AppEvent::Terminal(CtEvent::Resize(_, _)) => {
-                // Ratatui handles resize on the next draw; nothing to do.
             }
             AppEvent::Terminal(_) => {}
             AppEvent::Net(StreamEvent::Daemon(msg)) => self.apply_daemon(msg),
-            AppEvent::Net(StreamEvent::Closed) => {
-                self.state.record_error("daemon closed the connection");
-                self.quit_requested = true;
+            AppEvent::Net(_) => {
+                // Closed/Errored already handled in event_loop.
             }
-            AppEvent::Net(StreamEvent::Errored(err)) => {
-                self.state.record_error(format!("daemon error: {err}"));
-                self.quit_requested = true;
-            }
-            AppEvent::Tick | AppEvent::Quit => {}
+            AppEvent::Tick => state.tick(),
         }
     }
 
     async fn apply_action(&mut self, action: Action) {
+        let Some(state) = self.state.as_mut() else { return };
         match action {
             Action::Quit => self.quit_requested = true,
-            Action::FocusPrompt => self.state.focus = Focus::Prompt,
-            Action::BlurPrompt => self.state.focus = Focus::Scrollback,
+            Action::FocusPrompt => state.focus = Focus::Prompt,
+            Action::BlurPrompt => state.focus = Focus::Scrollback,
             Action::SubmitPrompt => self.submit_prompt().await,
-            Action::NewlineInPrompt => self.state.prompt_buffer.push('\n'),
-            Action::NextSession => self.state.sessions.focus_next(),
-            Action::PrevSession => self.state.sessions.focus_prev(),
+            Action::NewlineInPrompt => {
+                state.prompt.insert_newline();
+            }
+            Action::AutocompleteCommand => {
+                autocomplete_command(state);
+            }
+            Action::NextSession => {
+                state.sessions.focus_next();
+                state.scroll_offset = 0;
+                self.ensure_attached().await;
+            }
+            Action::PrevSession => {
+                state.sessions.focus_prev();
+                state.scroll_offset = 0;
+                self.ensure_attached().await;
+            }
             Action::Interrupt => self.interrupt().await,
             Action::Approve => self.approve(true).await,
             Action::Deny => self.approve(false).await,
             Action::CycleMode => {
-                // TODO: implement via session.set_mode
                 info!("cycle mode: not yet implemented");
             }
             Action::ToggleHelp => {
-                self.state.modal = match self.state.modal {
+                state.modal = match state.modal {
                     Some(Modal::Help) => None,
                     _ => Some(Modal::Help),
                 };
             }
-            Action::ScrollUp => self.state.scroll_offset = self.state.scroll_offset.saturating_add(1),
-            Action::ScrollDown => {
-                self.state.scroll_offset = self.state.scroll_offset.saturating_sub(1);
+            Action::DismissModal => {
+                state.modal = None;
             }
-            Action::PageUp => self.state.scroll_offset = self.state.scroll_offset.saturating_add(10),
+            Action::ScrollUp => {
+                state.scroll_offset = state.scroll_offset.saturating_add(1);
+            }
+            Action::ScrollDown => {
+                state.scroll_offset = state.scroll_offset.saturating_sub(1);
+            }
+            Action::PageUp => {
+                state.scroll_offset = state.scroll_offset.saturating_add(10);
+            }
             Action::PageDown => {
-                self.state.scroll_offset = self.state.scroll_offset.saturating_sub(10);
+                state.scroll_offset = state.scroll_offset.saturating_sub(10);
             }
         }
     }
 
     fn apply_daemon(&mut self, msg: DaemonMessage) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
         match msg {
             DaemonMessage::SessionListResult { sessions, .. } => {
-                self.state.set_sessions(sessions);
+                state.set_sessions(sessions);
+                let to_attach = state.sessions.focused_id().map(ToString::to_string);
+                if let Some(id) = to_attach {
+                    // Queue a defensive attach for the freshly-focused
+                    // session. We don't await here — apply_daemon runs
+                    // inside update() which holds a &mut self reborrow,
+                    // and awaiting would require more restructuring. The
+                    // user's first send will await-attach before sending,
+                    // which is what actually matters for correctness.
+                    let _ = self
+                        .state
+                        .as_mut()
+                        .map(|s| s.note_attached(&id))
+                        .unwrap_or(false);
+                    if let Some(handle) = self.handle.clone() {
+                        tokio::spawn(async move {
+                            let msg = ClientMessage::SessionAttach {
+                                id: ClientHandle::next_request_id(),
+                                session_id: id,
+                            };
+                            let _ = handle.send(msg).await;
+                        });
+                    }
+                }
             }
             DaemonMessage::SessionInfoUpdate { session, .. } => {
-                self.state.merge_session(session);
+                state.merge_session(session);
             }
             DaemonMessage::SessionStatusChange {
                 session_id, status, ..
             } => {
-                if let Some(s) = self
-                    .state
+                if let Some(s) = state
                     .sessions
                     .items()
                     .iter()
@@ -172,21 +293,37 @@ impl App {
                 {
                     let mut updated = s;
                     updated.status = status;
-                    self.state.merge_session(updated);
+                    state.merge_session(updated);
                 }
             }
-            DaemonMessage::SessionMessage(m) => self.state.messages.apply_message(m),
-            DaemonMessage::SessionMessageDelta(d) => self.state.messages.apply_delta(d),
+            DaemonMessage::SessionMessage(m) => {
+                let produces_text = matches!(
+                    m.role,
+                    codeoid_protocol::MessageRole::Assistant
+                        | codeoid_protocol::MessageRole::Thinking
+                );
+                let session_id = m.session_id.clone();
+                state.messages.apply_message(m);
+                if produces_text {
+                    state.mark_activity(&session_id);
+                }
+            }
+            DaemonMessage::SessionMessageDelta(d) => {
+                let session_id = d.session_id.clone();
+                state.messages.apply_delta(d);
+                state.mark_activity(&session_id);
+            }
             DaemonMessage::ScrollbackReplay {
                 session_id,
                 messages,
-            } => self.state.messages.replace_scrollback(session_id, messages),
+            } => state.messages.replace_scrollback(session_id, messages),
+            DaemonMessage::ResponseError { error, code, .. } => {
+                state.record_error(format!("daemon error [{code:?}]: {error}"));
+            }
             DaemonMessage::SessionSearchResult { .. }
             | DaemonMessage::AuthOk(_)
-            | DaemonMessage::ResponseOk { .. }
-            | DaemonMessage::ResponseError { .. } => {
-                // Solicited; handled by the request registry. If we got here
-                // it's because no one was waiting — safe to ignore.
+            | DaemonMessage::ResponseOk { .. } => {
+                // Solicited; handled by the request registry.
             }
             DaemonMessage::Unknown => {
                 warn!("received unknown daemon message; forward-compat drop");
@@ -194,15 +331,128 @@ impl App {
         }
     }
 
+    // -------- connection lifecycle --------
+
+    fn absorb_connection(&mut self, connected: Connected) {
+        let state = self
+            .state
+            .get_or_insert_with(|| AppState::new(connected.auth.clone()));
+        state.connection = ConnectionState::Connected;
+        // Always clear attach ledger on new connection — the daemon has
+        // zero state about us.
+        state.attached.clear();
+        self.handle = Some(connected.handle);
+        self.daemon_events = Some(connected.events);
+    }
+
+    async fn on_connected(&mut self) {
+        // Kick off an initial session list so the tabs aren't empty.
+        if let Some(handle) = self.handle.as_ref() {
+            let id = ClientHandle::next_request_id();
+            if let Err(e) = handle.send(ClientMessage::SessionList { id }).await {
+                warn!(error = %e, "failed to send initial session.list");
+            }
+        }
+    }
+
+    async fn reconnect_with_backoff(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) -> Result<()> {
+        for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
+            let delay_secs = (1u64 << (attempt - 1)).min(30);
+            if let Some(state) = self.state.as_mut() {
+                state.connection = ConnectionState::Reconnecting {
+                    attempt,
+                    next_attempt_in_secs: delay_secs,
+                };
+                terminal.draw(|f| ui::render(f, state))?;
+            }
+
+            debug!(attempt, delay_secs, "reconnect attempt pending");
+            let deadline = Instant::now() + Duration::from_secs(delay_secs);
+            while Instant::now() < deadline {
+                sleep(Duration::from_millis(200)).await;
+                if let Some(state) = self.state.as_mut() {
+                    terminal.draw(|f| ui::render(f, state))?;
+                }
+            }
+
+            match connect(&self.url, &self.token).await {
+                Ok(connected) => {
+                    info!(attempt, "reconnected");
+                    // Preserve the message store and session list; they're
+                    // survivors of the drop. The daemon will re-send
+                    // scrollback on re-attach anyway.
+                    let previously_attached: Vec<String> = self
+                        .state
+                        .as_ref()
+                        .map(|s| s.attached.iter().cloned().collect())
+                        .unwrap_or_default();
+                    self.absorb_connection(connected);
+                    self.on_connected().await;
+                    // Re-attach sequentially so the next send lands in
+                    // the right broadcast list.
+                    for id in previously_attached {
+                        self.attach_if_needed(id).await;
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(attempt, error = %e, "reconnect failed");
+                }
+            }
+        }
+        Err(anyhow!(
+            "could not reconnect after {MAX_RECONNECT_ATTEMPTS} attempts"
+        ))
+    }
+
+    // -------- user-driven commands --------
+
     async fn submit_prompt(&mut self) {
-        let Some(session) = self.state.sessions.focused().cloned() else {
-            self.state.record_error("no session focused");
+        let text = {
+            let Some(state) = self.state.as_mut() else { return };
+            let Some(text) = state.take_prompt() else {
+                return;
+            };
+            text
+        };
+
+        // Slash-command shortcut — intercept before treating as a message.
+        match commands::parse(&text) {
+            Ok(Some(cmd)) => {
+                self.dispatch_slash_command(cmd).await;
+                return;
+            }
+            Err(e) => {
+                if let Some(state) = self.state.as_mut() {
+                    state.record_error(e.to_string());
+                }
+                return;
+            }
+            Ok(None) => {}
+        }
+
+        // Regular message send.
+        let Some(session) = self
+            .state
+            .as_ref()
+            .and_then(|s| s.sessions.focused().cloned())
+        else {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error("no session — try /new <name> [workdir]");
+            }
             return;
         };
-        let text = std::mem::take(&mut self.state.prompt_buffer);
-        if text.trim().is_empty() {
-            return;
-        }
+
+        // Serialize attach -> send on the same ordered mpsc. This is the
+        // ONLY place that guarantees the daemon sees our attach before the
+        // first send — without it, the daemon drops our broadcast list
+        // for this session and the user sees nothing.
+        self.attach_if_needed(session.id.clone()).await;
+
+        let Some(handle) = self.handle.clone() else { return };
         let id = ClientHandle::next_request_id();
         let msg = ClientMessage::SessionSend {
             id,
@@ -211,41 +461,256 @@ impl App {
             attachments: None,
             priority: None,
         };
-        if let Err(e) = self.handle.send(msg).await {
-            self.state.record_error(format!("send failed: {e}"));
+        if let Err(e) = handle.send(msg).await {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error(format!("send failed: {e}"));
+            }
+            return;
+        }
+        if let Some(state) = self.state.as_mut() {
+            state.last_error = None;
+            state.scroll_offset = 0;
+            state.focus = Focus::Prompt;
+        }
+    }
+
+    async fn dispatch_slash_command(&mut self, cmd: SlashCommand) {
+        match cmd {
+            SlashCommand::New { name, workdir } => self.create_session(name, workdir).await,
+            SlashCommand::Rename { name } => self.rename_focused(name).await,
+            SlashCommand::Destroy => self.destroy_focused().await,
+            SlashCommand::Interrupt => self.interrupt().await,
+            SlashCommand::Approve => self.approve(true).await,
+            SlashCommand::Deny => self.approve(false).await,
+            SlashCommand::Rotate => self.rotate_focused().await,
+            SlashCommand::SetMode(mode) => self.set_mode(mode).await,
+            SlashCommand::Help => {
+                if let Some(state) = self.state.as_mut() {
+                    state.modal = Some(Modal::Help);
+                }
+            }
+            SlashCommand::Clear => {
+                // take_prompt already drained the editor; nothing else to do.
+            }
+        }
+    }
+
+    async fn rename_focused(&mut self, name: String) {
+        let Some(session_id) = self
+            .state
+            .as_ref()
+            .and_then(|s| s.sessions.focused_id().map(ToString::to_string))
+        else {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error("no session focused — nothing to rename");
+            }
+            return;
+        };
+        let Some(handle) = self.handle.clone() else { return };
+        let id = ClientHandle::next_request_id();
+        let msg = ClientMessage::SessionRename {
+            id,
+            session_id,
+            name,
+        };
+        if let Err(e) = handle.send(msg).await {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error(format!("rename failed: {e}"));
+            }
+        }
+        // No need to refresh the list — daemon broadcasts session.info_update
+        // which our reducer already merges into AppState.sessions.
+    }
+
+    async fn create_session(&mut self, name: String, workdir: Option<String>) {
+        let resolved_workdir = workdir
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "/tmp".into());
+
+        let Some(handle) = self.handle.clone() else { return };
+        let id = ClientHandle::next_request_id();
+        let msg = ClientMessage::SessionCreate {
+            id,
+            name: name.clone(),
+            workdir: resolved_workdir.clone(),
+        };
+        if let Err(e) = handle.send(msg).await {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error(format!("create-session failed: {e}"));
+            }
+            return;
+        }
+        // Refresh the session list so the new tab shows up.
+        let list_id = ClientHandle::next_request_id();
+        let _ = handle.send(ClientMessage::SessionList { id: list_id }).await;
+        if let Some(state) = self.state.as_mut() {
+            state.last_error = None;
+        }
+        info!(%name, workdir = %resolved_workdir, "requested session.create");
+    }
+
+    async fn destroy_focused(&mut self) {
+        let Some(session_id) = self
+            .state
+            .as_ref()
+            .and_then(|s| s.sessions.focused_id().map(ToString::to_string))
+        else {
+            return;
+        };
+        let Some(handle) = self.handle.clone() else { return };
+        let id = ClientHandle::next_request_id();
+        let _ = handle
+            .send(ClientMessage::SessionDestroy { id, session_id })
+            .await;
+        let list_id = ClientHandle::next_request_id();
+        let _ = handle.send(ClientMessage::SessionList { id: list_id }).await;
+    }
+
+    async fn rotate_focused(&mut self) {
+        let Some(session_id) = self
+            .state
+            .as_ref()
+            .and_then(|s| s.sessions.focused_id().map(ToString::to_string))
+        else {
+            return;
+        };
+        let Some(handle) = self.handle.clone() else { return };
+        let id = ClientHandle::next_request_id();
+        let _ = handle
+            .send(ClientMessage::SessionRotate { id, session_id })
+            .await;
+    }
+
+    async fn set_mode(&mut self, mode: SessionMode) {
+        let Some(session_id) = self
+            .state
+            .as_ref()
+            .and_then(|s| s.sessions.focused_id().map(ToString::to_string))
+        else {
+            return;
+        };
+        let Some(handle) = self.handle.clone() else { return };
+        let id = ClientHandle::next_request_id();
+        let _ = handle
+            .send(ClientMessage::SessionSetMode {
+                id,
+                session_id,
+                mode,
+                max_turns: None,
+            })
+            .await;
+    }
+
+    async fn ensure_attached(&mut self) {
+        let Some(state) = self.state.as_ref() else { return };
+        let Some(id) = state.sessions.focused_id().map(ToString::to_string) else {
+            return;
+        };
+        self.attach_if_needed(id).await;
+    }
+
+    /// Ensure `session.attach` has been enqueued to the daemon for this
+    /// session, serially — awaits the mpsc write so any subsequent send
+    /// is guaranteed to arrive after the attach. Idempotent via
+    /// `note_attached`.
+    ///
+    /// Previously this used `tokio::spawn` which introduced a race: the
+    /// spawned task wasn't guaranteed to enqueue the attach before the
+    /// caller's next `handle.send(...)` call did, so the first
+    /// `session.send` after a switch could arrive at the daemon before
+    /// the attach and be silently dropped from this client's broadcast
+    /// list.
+    async fn attach_if_needed(&mut self, session_id: String) {
+        {
+            let Some(state) = self.state.as_mut() else { return };
+            if !state.note_attached(&session_id) {
+                return;
+            }
+        }
+        let Some(handle) = self.handle.clone() else { return };
+        let msg = ClientMessage::SessionAttach {
+            id: ClientHandle::next_request_id(),
+            session_id: session_id.clone(),
+        };
+        if let Err(e) = handle.send(msg).await {
+            warn!(error = %e, session_id = %session_id, "session.attach failed");
+            // Roll back the ledger so a retry can try again.
+            if let Some(state) = self.state.as_mut() {
+                state.attached.remove(&session_id);
+            }
         }
     }
 
     async fn interrupt(&mut self) {
-        let Some(session) = self.state.sessions.focused() else { return };
+        let Some(state) = self.state.as_ref() else { return };
+        let Some(session) = state.sessions.focused() else { return };
+        let sid = session.id.clone();
+        let Some(handle) = self.handle.clone() else { return };
         let id = ClientHandle::next_request_id();
-        let msg = ClientMessage::SessionInterrupt {
-            id,
-            session_id: session.id.clone(),
-        };
-        if let Err(e) = self.handle.send(msg).await {
-            self.state.record_error(format!("interrupt failed: {e}"));
+        if let Err(e) = handle
+            .send(ClientMessage::SessionInterrupt {
+                id,
+                session_id: sid,
+            })
+            .await
+        {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error(format!("interrupt failed: {e}"));
+            }
         }
     }
 
     async fn approve(&mut self, approved: bool) {
-        // MVP: pick the most recent waiting_confirmation approval across the
-        // focused session and respond to it.
-        let Some(session) = self.state.sessions.focused() else { return };
-        let Some(approval_id) = find_latest_approval(&self.state, &session.id) else {
-            return;
+        let (session_id, approval_id) = {
+            let Some(state) = self.state.as_ref() else { return };
+            let Some(session) = state.sessions.focused() else { return };
+            let sid = session.id.clone();
+            let Some(approval_id) = find_latest_approval(state, &sid) else {
+                return;
+            };
+            (sid, approval_id)
         };
+        let Some(handle) = self.handle.clone() else { return };
         let id = ClientHandle::next_request_id();
-        let msg = ClientMessage::SessionApprove {
-            id,
-            session_id: session.id.clone(),
-            approval_id,
-            approved,
-        };
-        if let Err(e) = self.handle.send(msg).await {
-            self.state.record_error(format!("approval failed: {e}"));
+        if let Err(e) = handle
+            .send(ClientMessage::SessionApprove {
+                id,
+                session_id,
+                approval_id,
+                approved,
+            })
+            .await
+        {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error(format!("approval failed: {e}"));
+            }
         }
     }
+}
+
+/// Tab-autocomplete in command mode: if the user's partial command
+/// uniquely matches a catalog entry, replace the prompt with
+/// `/<full-name> ` (trailing space so they can start typing args). No-op
+/// on ambiguous or zero matches — the palette hint line already tells the
+/// user what their options are.
+fn autocomplete_command(state: &mut AppState) {
+    use tui_textarea::TextArea;
+
+    let Some(query) = state.command_query() else { return };
+    let Some(full) = commands::unique_completion(query) else {
+        return;
+    };
+
+    // Rebuild the editor with the completed command + trailing space.
+    let mut fresh = TextArea::default();
+    fresh.set_cursor_line_style(ratatui::style::Style::default());
+    fresh.set_placeholder_text("Message…  Enter sends · Shift+Enter newline · Esc blurs");
+    fresh.insert_str(format!("/{full} "));
+    state.prompt = fresh;
 }
 
 fn find_latest_approval(state: &AppState, session_id: &str) -> Option<String> {
@@ -265,3 +730,4 @@ fn find_latest_approval(state: &AppState, session_id: &str) -> Option<String> {
         })
         .next()
 }
+

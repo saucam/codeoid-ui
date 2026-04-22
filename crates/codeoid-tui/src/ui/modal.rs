@@ -3,12 +3,14 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::state::{AppState, Modal};
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
+    // Signature matches the scope needed here; the rest of the tree can
+    // borrow mutably without hitting this widget.
     let Some(modal) = &state.modal else { return };
     let area = centered(frame.area(), 60, 50);
 
@@ -17,9 +19,6 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     match modal {
         Modal::Help => render_help(frame, area),
         Modal::ConfirmDestroy { name, .. } => render_confirm_destroy(frame, area, name),
-        Modal::ProtocolDrift { client, daemon } => {
-            render_protocol_drift(frame, area, *client, *daemon);
-        }
     }
 }
 
@@ -96,41 +95,6 @@ fn render_confirm_destroy(frame: &mut Frame<'_>, area: Rect, name: &str) {
                 .borders(Borders::ALL)
                 .title(" Confirm destroy ")
                 .border_style(Style::default().fg(Color::Red)),
-        );
-    frame.render_widget(p, area);
-}
-
-fn render_protocol_drift(frame: &mut Frame<'_>, area: Rect, client: u32, daemon: Option<u32>) {
-    let daemon_label = daemon.map_or_else(|| "unknown (pre-v1)".to_string(), |v| v.to_string());
-    let body = vec![
-        Line::raw(""),
-        Line::from(Span::styled(
-            "⚠  Protocol version drift",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        )),
-        Line::raw(""),
-        Line::from(format!("Client speaks version {client}")),
-        Line::from(format!("Daemon speaks version {daemon_label}")),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "The daemon treats additions as non-breaking.",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(Span::styled(
-            "If you see weird behaviour, upgrade one side.",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::raw(""),
-        Line::from("[?] dismiss"),
-    ];
-    let p = Paragraph::new(body)
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Protocol drift ")
-                .border_style(Style::default().fg(Color::Yellow)),
         );
     frame.render_widget(p, area);
 }
