@@ -1,0 +1,31 @@
+[package]
+name = "codeoid-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Ratatui-based terminal cockpit for the Codeoid daemon."
+
+[[bin]]
+name = "codeoid-tui"
+path = "src/main.rs"
+
+[dependencies]
+codeoid-protocol = { workspace = true }
+codeoid-client   = { workspace = true }
+
+tokio = { workspace = true }
+futures-util = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tui-textarea = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }

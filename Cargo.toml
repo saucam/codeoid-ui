@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/codeoid-protocol",
+    "crates/codeoid-client",
+    "crates/codeoid-tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["Codeoid <dev@codeoid.ai>"]
+repository = "https://github.com/codeoid/codeoid-ui"
+
+[workspace.dependencies]
+# Workspace-internal
+codeoid-protocol = { path = "crates/codeoid-protocol" }
+codeoid-client   = { path = "crates/codeoid-client" }
+
+# Async runtime
+tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "io-std", "io-util"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# TUI
+ratatui = { version = "0.29", features = ["crossterm", "all-widgets"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+tui-textarea = "0.7"
+
+# Utility
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
+url = "2.5"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,29 @@
+[package]
+name = "codeoid-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Async WebSocket client for the Codeoid daemon. Handles auth handshake, request/response correlation, and the unsolicited event stream."
+
+[dependencies]
+codeoid-protocol = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+
+[[example]]
+name = "headless"
+path = "examples/headless.rs"
