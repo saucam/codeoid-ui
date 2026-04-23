@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 pub mod messages;
+pub mod render_cache;
 pub mod sessions;
 
 use std::collections::{HashMap, HashSet};
@@ -17,6 +18,7 @@ use codeoid_protocol::{AuthOkMsg, SessionInfo};
 use tui_textarea::TextArea;
 
 use self::messages::MessageStore;
+use self::render_cache::RenderCache;
 use self::sessions::SessionList;
 
 /// Entire UI state. Every mutation goes through a single `apply_*` method
@@ -31,7 +33,24 @@ pub struct AppState {
     /// navigation, arrow keys, backspace/delete, multi-line, and
     /// rendering of the cursor glyph — everything a real editor needs.
     pub prompt: TextArea<'static>,
+    /// Rows above the natural bottom of the transcript. 0 = sticky-to-
+    /// latest (Bottom mode); positive = scrolled up (Anchored mode).
+    /// While positive, the renderer auto-bumps this each frame as new
+    /// content streams in at the bottom, so the user's view stays
+    /// pinned to the content they were reading.
     pub scroll_offset: u16,
+    /// Total rendered rows of the transcript on the previous frame.
+    /// Used to detect "new content arrived at the bottom" and update
+    /// `scroll_offset` + `unseen_below_rows` accordingly.
+    pub last_total_rendered: usize,
+    /// Rows that have arrived below the user's current viewport since
+    /// they scrolled up. Surfaces as "↓ N new" in the worker row.
+    /// Reset to 0 when they catch back up to the bottom.
+    pub unseen_below_rows: usize,
+    /// Inner height (post-borders) of the transcript viewport, captured
+    /// each frame. Used to size PgUp/PgDn jumps so they move "almost a
+    /// full page" with one row of overlap (the standard pager UX).
+    pub last_viewport_rows: u16,
     pub last_error: Option<String>,
     /// Monotonically increasing tick counter driven by the 100 ms `Tick`
     /// event. Used by spinners and verb rotations to stay animated.
@@ -50,6 +69,10 @@ pub struct AppState {
     pub attached: HashSet<String>,
     /// Connection health — surfaced as a pill in the status bar.
     pub connection: ConnectionState,
+    /// Per-message styled-line cache. Lives at the app level so it
+    /// survives across frames; invalidated by message version + width.
+    /// See [`RenderCache`] for the keying rules.
+    pub render_cache: RenderCache,
 }
 
 impl std::fmt::Debug for AppState {
@@ -93,11 +116,15 @@ impl AppState {
             modal: None,
             prompt,
             scroll_offset: 0,
+            last_total_rendered: 0,
+            unseen_below_rows: 0,
+            last_viewport_rows: 0,
             last_error: None,
             anim_tick: 0,
             activity_by_session: HashMap::new(),
             attached: HashSet::new(),
             connection: ConnectionState::Connected,
+            render_cache: RenderCache::default(),
         }
     }
 
@@ -178,6 +205,55 @@ impl AppState {
 
     pub fn record_error(&mut self, err: impl Into<String>) {
         self.last_error = Some(err.into());
+    }
+
+    /// Scroll up by N rendered rows. Transitions Bottom → Anchored on
+    /// the first row of upward movement.
+    pub fn scroll_up(&mut self, by: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_add(by);
+    }
+
+    /// Scroll down by N rendered rows. Once the offset returns to 0 we
+    /// drop the unseen-below counter — the user has caught up.
+    pub fn scroll_down(&mut self, by: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(by);
+        // The user has scrolled past some of the previously-unseen
+        // content; clamp so the indicator never reports more "new
+        // below" than actually remains below the viewport.
+        self.unseen_below_rows = self.unseen_below_rows.min(self.scroll_offset as usize);
+    }
+
+    /// Jump back to the natural bottom (= sticky / following mode).
+    /// Called on user "End" / "PgDn-to-zero" / submit / session switch.
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = 0;
+        self.unseen_below_rows = 0;
+    }
+
+    /// Jump to the top of the transcript. Implementation: set offset to
+    /// the maximum so the renderer's saturating math lands at row 0.
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_offset = u16::MAX;
+    }
+
+    /// Called by the renderer once it knows the post-wrap row count.
+    /// Performs the "anchored" maintenance: when content streams in at
+    /// the bottom while the user is scrolled up, bump `scroll_offset`
+    /// by the same delta so the visible window stays pinned to the
+    /// content the user was reading, and accumulate `unseen_below_rows`
+    /// for the "↓ N new" indicator.
+    pub fn note_total_rendered(&mut self, total: usize) {
+        if self.scroll_offset > 0 && total > self.last_total_rendered {
+            let delta = total - self.last_total_rendered;
+            // u16 saturation is fine: at >65k rows below the fold, the
+            // exact count stops being meaningful — the indicator just
+            // shows "lots".
+            self.scroll_offset = self
+                .scroll_offset
+                .saturating_add(delta.min(u16::MAX as usize) as u16);
+            self.unseen_below_rows = self.unseen_below_rows.saturating_add(delta);
+        }
+        self.last_total_rendered = total;
     }
 }
 
@@ -283,5 +359,113 @@ mod tests {
         state.mark_activity("s");
         state.anim_tick = state.anim_tick.wrapping_add(5);
         assert_eq!(state.ticks_since_activity("s"), Some(5));
+    }
+
+    // ============ Anchored scroll ============
+
+    #[test]
+    fn scroll_starts_at_bottom() {
+        let state = mk_state();
+        assert_eq!(state.scroll_offset, 0);
+        assert_eq!(state.unseen_below_rows, 0);
+    }
+
+    #[test]
+    fn new_content_at_bottom_doesnt_move_view_when_scrolled_up() {
+        let mut state = mk_state();
+
+        // Start at the bottom with 100 rendered rows.
+        state.note_total_rendered(100);
+
+        // User scrolls up 20 rows.
+        state.scroll_up(20);
+        assert_eq!(state.scroll_offset, 20);
+
+        // 5 new rows arrive at the bottom. The user's view must STAY
+        // pinned to the same content — scroll_offset should bump to 25
+        // (still 20 rows above the previous anchor) and the indicator
+        // counts 5 new arrivals.
+        state.note_total_rendered(105);
+        assert_eq!(state.scroll_offset, 25);
+        assert_eq!(state.unseen_below_rows, 5);
+    }
+
+    #[test]
+    fn new_content_at_bottom_doesnt_count_when_at_bottom() {
+        let mut state = mk_state();
+        state.note_total_rendered(50);
+        // User is at the bottom (Bottom mode). New content shouldn't
+        // be counted as "unseen" — they're already following.
+        state.note_total_rendered(80);
+        assert_eq!(state.scroll_offset, 0);
+        assert_eq!(state.unseen_below_rows, 0);
+    }
+
+    #[test]
+    fn scroll_down_clamps_unseen_to_remaining_below() {
+        let mut state = mk_state();
+        state.note_total_rendered(100);
+        state.scroll_up(30);
+        // 10 new rows → unseen=10, scroll=40.
+        state.note_total_rendered(110);
+        assert_eq!(state.unseen_below_rows, 10);
+
+        // Scroll down 35 rows. Now only 5 rows below viewport — the
+        // indicator can't honestly say there are 10 below.
+        state.scroll_down(35);
+        assert_eq!(state.scroll_offset, 5);
+        assert_eq!(state.unseen_below_rows, 5);
+    }
+
+    #[test]
+    fn scroll_to_bottom_clears_indicator() {
+        let mut state = mk_state();
+        // Real renderer always calls note_total before the user can
+        // scroll (you need a frame to see what to scroll). Establish
+        // that baseline first.
+        state.note_total_rendered(200);
+        state.scroll_up(50);
+        state.note_total_rendered(220); // +20 unseen
+        assert_eq!(state.unseen_below_rows, 20);
+
+        state.scroll_to_bottom();
+        assert_eq!(state.scroll_offset, 0);
+        assert_eq!(state.unseen_below_rows, 0);
+    }
+
+    #[test]
+    fn scroll_down_to_zero_clears_indicator() {
+        let mut state = mk_state();
+        state.note_total_rendered(100);
+        state.scroll_up(10);
+        state.note_total_rendered(115); // +15 unseen, scroll=25
+        // PgDn: scroll all the way back.
+        state.scroll_down(100); // saturates to 0
+        assert_eq!(state.scroll_offset, 0);
+        assert_eq!(state.unseen_below_rows, 0);
+    }
+
+    #[test]
+    fn scroll_to_top_lands_at_zero_after_render() {
+        // scroll_to_top sets offset to u16::MAX; the renderer's
+        // saturating math turns that into row 0. Here we just verify
+        // the state-side contract.
+        let mut state = mk_state();
+        state.scroll_to_top();
+        assert_eq!(state.scroll_offset, u16::MAX);
+    }
+
+    #[test]
+    fn shrinking_total_doesnt_underflow() {
+        // Session switch / message prune can shrink total. note_total
+        // must not panic.
+        let mut state = mk_state();
+        state.note_total_rendered(500);
+        state.scroll_up(100);
+        state.note_total_rendered(50); // huge shrink
+        // No bump applied (delta is negative); last_total updates.
+        assert_eq!(state.scroll_offset, 100);
+        assert_eq!(state.unseen_below_rows, 0);
+        assert_eq!(state.last_total_rendered, 50);
     }
 }

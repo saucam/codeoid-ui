@@ -25,6 +25,10 @@ fn upsert(buf: &mut Vec<SessionMessage>, m: SessionMessage) {
 #[derive(Debug, Default)]
 pub struct MessageStore {
     by_session: HashMap<String, Vec<SessionMessage>>,
+    /// Per-message version counter, bumped on every mutation. Used as
+    /// the cache key in [`crate::state::RenderCache`] so cached styled
+    /// lines stay valid until the underlying message changes.
+    versions: HashMap<String, u64>,
 }
 
 impl MessageStore {
@@ -34,9 +38,25 @@ impl MessageStore {
             .map_or::<&[SessionMessage], _>(&[], Vec::as_slice)
     }
 
+    /// Monotonic version number for a message. Returns 0 for unknown
+    /// ids; any version >= 1 means "we've seen this id at least once."
+    /// Wrapping arithmetic on u64 means overflow is theoretical, not
+    /// practical.
+    #[must_use]
+    pub fn version_of(&self, message_id: &str) -> u64 {
+        self.versions.get(message_id).copied().unwrap_or(0)
+    }
+
+    fn bump(&mut self, message_id: &str) {
+        let entry = self.versions.entry(message_id.to_string()).or_insert(0);
+        *entry = entry.wrapping_add(1);
+    }
+
     pub fn apply_message(&mut self, msg: SessionMessage) {
+        let mid = msg.message_id.clone();
         let buf = self.by_session.entry(msg.session_id.clone()).or_default();
         upsert(buf, msg);
+        self.bump(&mid);
     }
 
     /// Apply a streaming delta. Drops with a `debug!` trace when we don't
@@ -106,9 +126,18 @@ impl MessageStore {
         }
 
         target.timestamp = delta.timestamp;
+
+        let mid = delta.message_id.clone();
+        self.bump(&mid);
     }
 
     pub fn replace_scrollback(&mut self, session_id: String, messages: Vec<SessionMessage>) {
+        // Bump every message's version so any prior cached render is
+        // invalidated. `replace_scrollback` runs on attach / re-attach,
+        // when content may have changed underneath us.
+        for m in &messages {
+            self.bump(&m.message_id);
+        }
         self.by_session.insert(session_id, messages);
     }
 

@@ -2,19 +2,21 @@
 //! with role-aware styling, right-aligned timestamps, and a live
 //! "Thinking…" placeholder for the in-flight assistant message.
 
-use codeoid_protocol::{MessageRole, SessionInfo, SessionMessage};
+use codeoid_protocol::{MessageRole, SessionInfo, SessionMessage, ToolState};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::render::{render_markdown_block, render_tool_block};
+use crate::render::{
+    parse_ansi, render_markdown_block, render_tool_block, sanitize_for_display, total_rendered_rows,
+};
 use crate::state::{AppState, Focus};
 
 const BODY_INDENT: &str = "  ";
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let focused_pane = state.focus == Focus::Scrollback;
     let border_style = if focused_pane {
         Style::default().fg(Color::Cyan)
@@ -22,7 +24,15 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Style::default().fg(Color::DarkGray)
     };
 
-    let Some(session) = state.sessions.focused() else {
+    // Snapshot the focused session's id + title so we can release the
+    // immutable borrow on `state.sessions` before reborrowing other
+    // fields mutably below.
+    let session_snapshot = state
+        .sessions
+        .focused()
+        .map(|s| (s.id.clone(), session_title(s)));
+
+    let Some((session_id, title)) = session_snapshot else {
         let placeholder = Paragraph::new(Line::from(vec![
             Span::raw("  "),
             Span::styled(
@@ -42,50 +52,104 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     };
 
-    let msgs = state.messages.messages(&session.id);
-    let mut lines: Vec<Line<'_>> = Vec::with_capacity(msgs.len() * 4);
-    for m in msgs {
-        let rendered = render_message(m, state.anim_tick);
-        if rendered.is_empty() {
-            // Placeholder messages (empty assistant/thinking mid-stream)
-            // don't render in the transcript — the worker row above the
-            // prompt is the single source of "something is happening".
-            continue;
+    let anim_tick = state.anim_tick;
+    let inner_width = area.width.saturating_sub(2).max(1); // minus L+R border
+    let viewport_rows_u16 = area.height.saturating_sub(2);
+    let viewport_rows: usize = viewport_rows_u16.into(); // minus T+B border
+    state.last_viewport_rows = viewport_rows_u16;
+
+    // Build the line buffer in a scope so the split-borrow on
+    // `state.messages` + `state.render_cache` is released before we
+    // mutate the scroll fields below.
+    let lines: Vec<Line<'static>> = {
+        let AppState {
+            ref messages,
+            ref mut render_cache,
+            ..
+        } = *state;
+
+        let msgs = messages.messages(&session_id);
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(msgs.len() * 4);
+        for m in msgs {
+            // Animation-driven content (running tool spinner, elapsed-
+            // time counter) must re-render every tick. Everything else
+            // is cached by (message_id, version, width) and reused
+            // across frames.
+            let skip_cache = is_animating(m);
+            let version = messages.version_of(&m.message_id);
+            let rendered = render_cache.get_or_render(
+                &m.message_id,
+                version,
+                inner_width,
+                skip_cache,
+                || render_message(m, anim_tick),
+            );
+            if rendered.is_empty() {
+                // Placeholder messages (empty assistant/thinking mid-
+                // stream) don't render in the transcript — the worker
+                // row above the prompt is the single source of
+                // "something is happening".
+                continue;
+            }
+            lines.extend(rendered);
+            lines.push(Line::raw(""));
         }
-        lines.extend(rendered);
-        lines.push(Line::raw(""));
-    }
 
-    if msgs.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::raw(BODY_INDENT.to_string()),
-            Span::styled(
-                "No messages yet. Type below and press Enter.",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-        ]));
-    }
+        if msgs.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::raw(BODY_INDENT.to_string()),
+                Span::styled(
+                    "No messages yet. Type below and press Enter.",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]));
+        }
+        lines
+    };
 
-    // Auto-stick: `scroll_offset` = lines above the natural bottom.
-    let total_lines = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-    let viewport = area.height.saturating_sub(2);
-    let max_top = total_lines.saturating_sub(viewport);
-    let top_line = max_top.saturating_sub(state.scroll_offset);
+    // Scroll math in RENDERED rows. `total_rendered_rows` accounts for
+    // unicode width (CJK = 2 cols), tab expansion, and word-wrap so
+    // stick-to-bottom is exact even on wrapped / wide-char output.
+    //
+    // While the user is scrolled up (Anchored mode), `note_total_rendered`
+    // bumps `scroll_offset` by however many rows arrived at the bottom
+    // since the previous frame, so the visible window stays pinned to
+    // the content the user was reading. Bottom mode (offset = 0) just
+    // follows the latest row.
+    let total_rendered = total_rendered_rows(&lines, inner_width);
+    state.note_total_rendered(total_rendered);
+
+    let max_y = total_rendered.saturating_sub(viewport_rows);
+    let y = max_y
+        .saturating_sub(state.scroll_offset as usize)
+        .min(u16::MAX as usize) as u16;
 
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((top_line, 0))
+        .scroll((y, 0))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(border_style)
-                .title(session_title(session)),
+                .title(title),
         );
 
     frame.render_widget(paragraph, area);
+}
+
+/// True when this message's rendered appearance changes per anim_tick.
+/// Today: running-tool spinners + elapsed-time counters. Cache must be
+/// bypassed for these so the spinner actually moves.
+fn is_animating(m: &SessionMessage) -> bool {
+    m.tool.as_ref().is_some_and(|t| {
+        matches!(
+            &t.state,
+            ToolState::Streaming { .. } | ToolState::Executing { .. }
+        )
+    })
 }
 
 fn session_title(session: &SessionInfo) -> Line<'static> {
@@ -140,12 +204,6 @@ fn render_message(m: &SessionMessage, anim_tick: u64) -> Vec<Line<'static>> {
     match m.role {
         MessageRole::ToolCall => {
             if let Some(tool) = &m.tool {
-                // The tool card itself shows live phase/progress inline.
-                // It's NOT redundant with the worker row — the worker
-                // row is session-level ("Claude is thinking") while the
-                // tool card is per-tool ("this specific Bash is still
-                // running"). A long turn may have 3 completed tools and
-                // 1 running — you need to see which.
                 out.extend(render_tool_block(tool, anim_tick, BODY_INDENT));
             }
             if !m.content.is_empty() {
@@ -153,16 +211,21 @@ fn render_message(m: &SessionMessage, anim_tick: u64) -> Vec<Line<'static>> {
             }
         }
         MessageRole::ToolResult => {
-            for line in m.content.lines() {
-                out.push(Line::from(vec![
-                    Span::raw(BODY_INDENT.to_string()),
-                    Span::styled("▌ ", Style::default().fg(Color::Magenta)),
-                    Span::styled(line.to_string(), Style::default().fg(Color::Gray)),
-                ]));
+            // Preserve ANSI styling from the tool's raw output so git /
+            // cargo / npm colors survive. A magenta left-rail marks each
+            // row as tool output without masking the command's own colors.
+            let rail_style = Style::default().fg(Color::Magenta);
+            for line in parse_ansi(&m.content) {
+                let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
+                spans.push(Span::raw(BODY_INDENT.to_string()));
+                spans.push(Span::styled("▌ ", rail_style));
+                spans.extend(line.spans);
+                out.push(Line::from(spans));
             }
         }
         MessageRole::Thinking => {
-            for raw in m.content.lines() {
+            let clean = sanitize_for_display(&m.content);
+            for raw in clean.lines() {
                 out.push(Line::from(vec![
                     Span::raw(BODY_INDENT.to_string()),
                     Span::styled("◇ ", Style::default().fg(Color::DarkGray)),
@@ -176,7 +239,8 @@ fn render_message(m: &SessionMessage, anim_tick: u64) -> Vec<Line<'static>> {
             }
         }
         MessageRole::System | MessageRole::Info => {
-            for raw in m.content.lines() {
+            let clean = sanitize_for_display(&m.content);
+            for raw in clean.lines() {
                 let style = if matches!(m.role, MessageRole::System) {
                     Style::default().fg(Color::Red)
                 } else {
@@ -189,7 +253,8 @@ fn render_message(m: &SessionMessage, anim_tick: u64) -> Vec<Line<'static>> {
             }
         }
         MessageRole::User => {
-            for raw in m.content.lines() {
+            let clean = sanitize_for_display(&m.content);
+            for raw in clean.lines() {
                 out.push(Line::from(vec![
                     Span::raw(BODY_INDENT.to_string()),
                     Span::styled(raw.to_string(), Style::default().fg(Color::White)),
@@ -197,7 +262,10 @@ fn render_message(m: &SessionMessage, anim_tick: u64) -> Vec<Line<'static>> {
             }
         }
         MessageRole::Assistant => {
-            out.extend(render_markdown_block(&m.content, BODY_INDENT));
+            // Markdown renderer walks characters, so raw ANSI would
+            // corrupt parsing just as badly. Strip before parse.
+            let clean = sanitize_for_display(&m.content);
+            out.extend(render_markdown_block(&clean, BODY_INDENT));
         }
     }
 

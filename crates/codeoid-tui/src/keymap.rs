@@ -25,6 +25,8 @@ pub enum Action {
     PageDown,
     ScrollUp,
     ScrollDown,
+    ScrollToTop,
+    ScrollToBottom,
 }
 
 pub fn resolve(
@@ -70,6 +72,8 @@ pub fn resolve(
             // Scroll transcript without blurring.
             (PageUp, _) => Some(Action::PageUp),
             (PageDown, _) => Some(Action::PageDown),
+            (Home, m) if m.contains(KeyModifiers::CONTROL) => Some(Action::ScrollToTop),
+            (End, m) if m.contains(KeyModifiers::CONTROL) => Some(Action::ScrollToBottom),
             (Up, m) if m.contains(KeyModifiers::CONTROL) => Some(Action::ScrollUp),
             (Down, m) if m.contains(KeyModifiers::CONTROL) => Some(Action::ScrollDown),
 
@@ -100,6 +104,8 @@ pub fn resolve(
         (Char('m'), _) => Some(Action::CycleMode),
         (PageUp, _) => Some(Action::PageUp),
         (PageDown, _) => Some(Action::PageDown),
+        (Home, _) | (Char('g'), KeyModifiers::NONE) => Some(Action::ScrollToTop),
+        (End, _) | (Char('G'), KeyModifiers::SHIFT) => Some(Action::ScrollToBottom),
         (Up, _) | (Char('k'), KeyModifiers::NONE) => Some(Action::ScrollUp),
         (Down, _) | (Char('j'), KeyModifiers::NONE) => Some(Action::ScrollDown),
         _ => None,

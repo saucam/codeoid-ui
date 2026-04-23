@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use codeoid_client::{connect, ClientHandle, Connected, StreamEvent};
-use codeoid_protocol::{ClientMessage, DaemonMessage, SessionMode};
+use codeoid_protocol::{
+    ClientMessage, DaemonMessage, SessionMode, SessionStatus, ToolState,
+};
 use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind};
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
@@ -118,9 +120,15 @@ impl App {
         term_events: &mut EventStream,
         ticker: &mut Interval,
     ) -> Result<bool> {
+        // First frame — always paint.
+        let mut dirty = true;
+
         loop {
-            if let Some(state) = self.state.as_mut() {
-                terminal.draw(|f| ui::render(f, state))?;
+            if dirty {
+                if let Some(state) = self.state.as_mut() {
+                    terminal.draw(|f| ui::render(f, state))?;
+                }
+                dirty = false;
             }
 
             let events = self
@@ -139,6 +147,8 @@ impl App {
                 Some(ev) = events.recv() => AppEvent::Net(ev),
                 _ = ticker.tick() => AppEvent::Tick,
             };
+
+            let is_tick = matches!(event, AppEvent::Tick);
 
             match &event {
                 AppEvent::Net(StreamEvent::Closed | StreamEvent::Errored(_)) => {
@@ -161,9 +171,22 @@ impl App {
             }
 
             self.update(event).await;
+
             if self.quit_requested {
                 return Ok(false);
             }
+
+            // Redraw policy: anything user-initiated or daemon-driven
+            // marks the UI dirty. Ticks only redraw if an animation is
+            // actually running — otherwise we'd repaint the screen 10×/s
+            // for no reason, destroying native terminal text selection.
+            dirty = if is_tick {
+                self.state
+                    .as_ref()
+                    .is_some_and(needs_animation_frame)
+            } else {
+                true
+            };
         }
     }
 
@@ -209,12 +232,12 @@ impl App {
             }
             Action::NextSession => {
                 state.sessions.focus_next();
-                state.scroll_offset = 0;
+                state.scroll_to_bottom();
                 self.ensure_attached().await;
             }
             Action::PrevSession => {
                 state.sessions.focus_prev();
-                state.scroll_offset = 0;
+                state.scroll_to_bottom();
                 self.ensure_attached().await;
             }
             Action::Interrupt => self.interrupt().await,
@@ -232,18 +255,12 @@ impl App {
             Action::DismissModal => {
                 state.modal = None;
             }
-            Action::ScrollUp => {
-                state.scroll_offset = state.scroll_offset.saturating_add(1);
-            }
-            Action::ScrollDown => {
-                state.scroll_offset = state.scroll_offset.saturating_sub(1);
-            }
-            Action::PageUp => {
-                state.scroll_offset = state.scroll_offset.saturating_add(10);
-            }
-            Action::PageDown => {
-                state.scroll_offset = state.scroll_offset.saturating_sub(10);
-            }
+            Action::ScrollUp => state.scroll_up(1),
+            Action::ScrollDown => state.scroll_down(1),
+            Action::PageUp => state.scroll_up(page_step(state)),
+            Action::PageDown => state.scroll_down(page_step(state)),
+            Action::ScrollToTop => state.scroll_to_top(),
+            Action::ScrollToBottom => state.scroll_to_bottom(),
         }
     }
 
@@ -469,7 +486,7 @@ impl App {
         }
         if let Some(state) = self.state.as_mut() {
             state.last_error = None;
-            state.scroll_offset = 0;
+            state.scroll_to_bottom();
             state.focus = Focus::Prompt;
         }
     }
@@ -711,6 +728,60 @@ fn autocomplete_command(state: &mut AppState) {
     fresh.set_placeholder_text("Message…  Enter sends · Shift+Enter newline · Esc blurs");
     fresh.insert_str(format!("/{full} "));
     state.prompt = fresh;
+}
+
+/// PageUp/PageDown step: a viewport-minus-one. Standard pager UX
+/// (more, less, vim) keeps one row of overlap on each page so the
+/// reader doesn't lose their place. Falls back to a sane default
+/// before the first frame, when we don't yet know the viewport size.
+fn page_step(state: &AppState) -> u16 {
+    state.last_viewport_rows.saturating_sub(1).max(10)
+}
+
+/// Returns `true` if the app's visual state will change on the next tick —
+/// i.e., there's an animation in progress that the user expects to see
+/// move. If `false`, the event loop can safely skip the redraw, which
+/// lets native terminal text selection stick (ratatui repaints every
+/// cell on draw, clobbering any selection highlight).
+fn needs_animation_frame(state: &AppState) -> bool {
+    // Connection pill animates during reconnect.
+    if matches!(state.connection, ConnectionState::Reconnecting { .. }) {
+        return true;
+    }
+
+    let Some(session) = state.sessions.focused() else {
+        return false;
+    };
+
+    // Session-level busy signal.
+    if matches!(session.status, SessionStatus::Working) {
+        return true;
+    }
+
+    // Any tool in a phase that shows a spinner.
+    let msgs = state.messages.messages(&session.id);
+    let any_tool_running = msgs.iter().any(|m| {
+        m.tool.as_ref().is_some_and(|t| {
+            matches!(
+                &t.state,
+                ToolState::Streaming { .. } | ToolState::Executing { .. }
+            )
+        })
+    });
+    if any_tool_running {
+        return true;
+    }
+
+    // Recent streaming delta still within the fallback window used by
+    // the worker row.
+    if state
+        .ticks_since_activity(&session.id)
+        .is_some_and(|t| t < 20)
+    {
+        return true;
+    }
+
+    false
 }
 
 fn find_latest_approval(state: &AppState, session_id: &str) -> Option<String> {

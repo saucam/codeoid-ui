@@ -256,20 +256,45 @@ fn tool_line(msgs: &[SessionMessage], tick: u64) -> Option<Line<'static>> {
 
 fn scroll_hint(state: &AppState) -> Line<'static> {
     if state.scroll_offset == 0 {
-        Line::from(Span::styled(
+        return Line::from(Span::styled(
             "↓ following · ",
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
-        ))
-    } else {
-        Line::from(Span::styled(
-            format!("scrolled ↑{} · [PgDn] catch up · ", state.scroll_offset),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::ITALIC),
-        ))
+        ));
     }
+
+    // Anchored mode. Highlight the "new below" count when content has
+    // streamed in since the user scrolled — that's the actionable
+    // signal ("there's something new for you"). The plain "scrolled ↑N"
+    // by itself is just navigational state.
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if state.unseen_below_rows > 0 {
+        spans.push(Span::styled(
+            format!("↓ {} new", state.unseen_below_rows),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            "  ·  ",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    spans.push(Span::styled(
+        format!("scrolled ↑{}", state.scroll_offset),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::ITALIC),
+    ));
+    spans.push(Span::styled(
+        "  ·  [End] catch up · ",
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    ));
+
+    Line::from(spans)
 }
 
 fn fmt_ms(ms: u64) -> String {

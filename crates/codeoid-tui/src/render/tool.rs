@@ -1,27 +1,49 @@
-//! Claude-code-style tool invocation rendering.
+//! Tool invocation rendering.
 //!
-//! Renders a compact "card" per tool call that evolves in place as the
-//! tool state progresses. Each phase has a distinctive header icon, an
-//! optional inline spinner, a summary of the tool input, and any output
-//! that's already landed.
+//! Each tool call renders inline in the transcript as:
+//!
+//! ```text
+//!   ⠋ bash  ·  running · 2.3s
+//!     › git status --short
+//!     M Cargo.toml            ← colors preserved via ANSI parser
+//!     ?? new_file.rs
+//! ```
+//!
+//! A small phase-colored icon + summary up top, an italic input preview,
+//! and the full command output indented beneath it. Colors in the output
+//! (e.g. `git status`, `cargo check`) are preserved via the ANSI parser
+//! in [`super::ansi`]. No boxes, no borders — the shape of the output
+//! comes from indentation alone.
 
 use codeoid_protocol::{ToolInfo, ToolState};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
+use super::ansi::parse_ansi;
 use super::markdown::inline_spans;
 use super::spinner::{seed_from, SpinnerFrame};
 
-pub fn render_tool_block(tool: &ToolInfo, anim_tick: u64, indent: &str) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    let spinner = SpinnerFrame::for_tick(anim_tick).glyph();
+/// Max body lines we show per tool call. Large `git log`s or `cargo
+/// build` dumps still render their head; the remainder collapses to a
+/// "+N more" tail so the transcript doesn't get drowned.
+const MAX_BODY_LINES: usize = 40;
 
-    // Header row — always present.
+/// Render a tool invocation. `indent` is the margin applied to the
+/// header; body content sits at `indent + "  "` so it reads as a
+/// continuation.
+pub fn render_tool_block(tool: &ToolInfo, anim_tick: u64, indent: &str) -> Vec<Line<'static>> {
+    let spinner = SpinnerFrame::for_tick(anim_tick).glyph();
+    let body_indent = format!("{indent}  ");
+
+    let mut out: Vec<Line<'static>> = Vec::new();
+
+    // Header: "  ⠋ bash  ·  running · 2.3s"
     let (icon, icon_style) = header_icon(&tool.state, spinner);
+    let _ = seed_from(&tool.tool_id); // keep usage marker
     out.push(Line::from(vec![
         Span::raw(indent.to_owned()),
-        Span::styled(icon.to_string(), icon_style),
+        Span::styled(icon, icon_style),
         Span::raw(" "),
         Span::styled(
             tool.name.clone(),
@@ -29,20 +51,17 @@ pub fn render_tool_block(tool: &ToolInfo, anim_tick: u64, indent: &str) -> Vec<L
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
+        Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
         phase_summary(tool, anim_tick),
     ]));
 
-    // Input preview — single most informative line we can extract from the
-    // tool's `input` value. Only shown once input is known (i.e. not during
-    // early `streaming` without partialInput).
-    if let Some(input_line) = input_preview(&tool.state) {
+    // Input preview: compact, italic, dim. Only when we have an input.
+    if let Some(preview) = input_preview(&tool.state) {
         out.push(Line::from(vec![
-            Span::raw(indent.to_owned()),
-            Span::raw("    "),
+            Span::raw(body_indent.clone()),
             Span::styled("› ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                input_line,
+                preview,
                 Style::default()
                     .fg(Color::Rgb(200, 210, 220))
                     .add_modifier(Modifier::ITALIC),
@@ -50,92 +69,93 @@ pub fn render_tool_block(tool: &ToolInfo, anim_tick: u64, indent: &str) -> Vec<L
         ]));
     }
 
-    // Description (waiting_confirmation phase).
+    // Waiting-for-approval: description + key prompt.
     if let ToolState::WaitingConfirmation { description, .. } = &tool.state {
-        let mut spans = vec![
-            Span::raw(indent.to_owned()),
-            Span::raw("    "),
+        let mut desc_spans = vec![
+            Span::raw(body_indent.clone()),
             Span::styled("⎯ ", Style::default().fg(Color::Magenta)),
         ];
-        spans.extend(inline_spans(description, Style::default()));
-        out.push(Line::from(spans));
-
+        desc_spans.extend(inline_spans(description, Style::default()));
+        out.push(Line::from(desc_spans));
         out.push(Line::from(vec![
-            Span::raw(indent.to_owned()),
-            Span::raw("    "),
+            Span::raw(body_indent.clone()),
+            Span::styled("Press ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                "Press ",
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                "[y]",
+                "[y] ",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled("approve · ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                " approve · ",
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                "[d]",
+                "[d] ",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" deny", Style::default().fg(Color::DarkGray)),
+            Span::styled("deny", Style::default().fg(Color::DarkGray)),
         ]));
     }
 
-    // Output body (executing with progress, or completed with output).
+    // Output body — ANSI-parsed so colors survive. Prepend our indent
+    // to each line's existing spans so wrap still happens past the margin.
+    let body = body_lines(tool);
+    let total_body = body.len();
+    let shown: Vec<Line<'static>> = body.into_iter().take(MAX_BODY_LINES).collect();
+    for line in shown {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 1);
+        spans.push(Span::raw(body_indent.clone()));
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
+    }
+    if total_body > MAX_BODY_LINES {
+        out.push(Line::from(vec![
+            Span::raw(body_indent.clone()),
+            Span::styled(
+                format!("… {} more line(s) truncated", total_body - MAX_BODY_LINES),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]));
+    }
+
+    out
+}
+
+/// The body rows (after the header) — progress messages, completed
+/// output, cancellation messages. All text is run through the ANSI
+/// parser so git/cargo/npm colors survive.
+fn body_lines(tool: &ToolInfo) -> Vec<Line<'static>> {
     match &tool.state {
         ToolState::Executing {
             progress: Some(p), ..
-        } => {
-            out.push(output_frame_line("· ", p, Color::Yellow, indent));
-        }
+        } => parse_ansi(p),
         ToolState::Completed {
             output: Some(output),
-            success,
             ..
-        } => {
-            let color = if *success { Color::Green } else { Color::Red };
-            for line in output.lines().take(40) {
-                out.push(output_frame_line("", line, color, indent));
-            }
-            if output.lines().count() > 40 {
-                out.push(Line::from(vec![
-                    Span::raw(indent.to_owned()),
-                    Span::raw("    "),
-                    Span::styled(
-                        format!(
-                            "… {} more line(s) truncated",
-                            output.lines().count().saturating_sub(40)
-                        ),
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-                ]));
-            }
-        }
+        } => parse_ansi(output),
         ToolState::Cancelled {
             message: Some(m), ..
         } => {
-            out.push(output_frame_line("", m, Color::Red, indent));
+            let mut out = parse_ansi(m);
+            if out.is_empty() {
+                out.push(Line::from(Span::styled(
+                    "cancelled",
+                    Style::default().fg(Color::Red),
+                )));
+            }
+            out
         }
-        _ => {}
+        _ => Vec::new(),
     }
-
-    // Stable, non-colliding seed so sibling tool cards get different verbs
-    // if we ever render both in working state simultaneously.
-    let _seed = seed_from(&tool.tool_id);
-    out
 }
 
 fn header_icon(state: &ToolState, spinner: &str) -> (String, Style) {
     match state {
-        ToolState::Streaming { .. } => (
+        ToolState::Streaming { .. } | ToolState::Executing { .. } => (
             spinner.to_string(),
-            Style::default().fg(Color::Yellow),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
         ToolState::WaitingConfirmation { .. } => (
             "⚠".to_string(),
@@ -143,18 +163,20 @@ fn header_icon(state: &ToolState, spinner: &str) -> (String, Style) {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         ),
-        ToolState::Executing { .. } => (
-            spinner.to_string(),
-            Style::default().fg(Color::Yellow),
+        ToolState::Completed { success: true, .. } => (
+            "✓".to_string(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ),
-        ToolState::Completed { success, .. } => {
-            if *success {
-                ("✓".to_string(), Style::default().fg(Color::Green))
-            } else {
-                ("✕".to_string(), Style::default().fg(Color::Red))
-            }
-        }
-        ToolState::Cancelled { .. } => ("✕".to_string(), Style::default().fg(Color::Red)),
+        ToolState::Completed { success: false, .. } => (
+            "✕".to_string(),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        ToolState::Cancelled { .. } => (
+            "✕".to_string(),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
     }
 }
 
@@ -212,19 +234,8 @@ fn fmt_elapsed(ms: Option<u64>) -> String {
     }
 }
 
-fn output_frame_line(prefix: &'static str, body: &str, color: Color, indent: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::raw(indent.to_owned()),
-        Span::raw("    "),
-        Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-        Span::styled(prefix.to_string(), Style::default().fg(color)),
-        Span::styled(body.to_string(), Style::default().fg(color)),
-    ])
-}
-
-/// Best-effort compact preview of the tool input. Handles a handful of
-/// common Anthropic tool shapes (Bash, Read, Edit, Write, Grep, Glob) —
-/// falls back to a truncated JSON repr for everything else.
+/// Best-effort compact preview of the tool input. Common Anthropic tool
+/// shapes have one informative field; pick it, truncate to 120 chars.
 fn input_preview(state: &ToolState) -> Option<String> {
     let input = match state {
         ToolState::Streaming {
@@ -236,7 +247,6 @@ fn input_preview(state: &ToolState) -> Option<String> {
 
     let obj = input.as_object()?;
 
-    // Common parameter shapes — pick the most informative single field.
     for key in [
         "command",
         "file_path",
@@ -250,13 +260,10 @@ fn input_preview(state: &ToolState) -> Option<String> {
             return Some(truncate(s, 120));
         }
     }
-
-    // Edit/Write tools — show the file path even if there's no obvious key.
     if let Some(Value::String(path)) = obj.get("filepath").or_else(|| obj.get("filePath")) {
         return Some(truncate(path, 120));
     }
 
-    // Fallback: short JSON dump.
     let compact = serde_json::to_string(input).ok()?;
     Some(truncate(&compact, 120))
 }
