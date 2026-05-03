@@ -20,6 +20,7 @@ use std::io;
 use anyhow::{Context, Result};
 use clap::Parser;
 use codeoid_client::resolve_token;
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -112,14 +113,18 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     //
     // If you need in-app mouse routing later, gate it behind a CLI flag
     // so the default experience stays copy-paste friendly.
-    execute!(stdout, EnterAlternateScreen)?;
+    // Bracketed paste tells the terminal to wrap pasted text in escape
+    // markers so we receive it as a single Event::Paste(String) instead
+    // of a stream of keypresses — without this, embedded newlines in a
+    // paste each fire SubmitPrompt.
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     Ok(terminal)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
 }

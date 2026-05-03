@@ -208,6 +208,11 @@ impl App {
                     state.prompt.input(key);
                 }
             }
+            AppEvent::Terminal(CtEvent::Paste(text)) => {
+                if state.focus == Focus::Prompt && state.modal.is_none() {
+                    state.prompt.insert_str(&text);
+                }
+            }
             AppEvent::Terminal(_) => {}
             AppEvent::Net(StreamEvent::Daemon(msg)) => self.apply_daemon(msg),
             AppEvent::Net(_) => {
