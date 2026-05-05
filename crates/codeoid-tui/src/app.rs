@@ -15,7 +15,7 @@ use codeoid_client::{connect, ClientHandle, Connected, StreamEvent};
 use codeoid_protocol::{
     ClientMessage, DaemonMessage, SessionMode, SessionStatus, ToolState,
 };
-use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind};
+use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKind};
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -211,6 +211,16 @@ impl App {
             AppEvent::Terminal(CtEvent::Paste(text)) => {
                 if state.focus == Focus::Prompt && state.modal.is_none() {
                     state.prompt.insert_str(&text);
+                }
+            }
+            AppEvent::Terminal(CtEvent::Mouse(m)) => {
+                // Wheel scrolls the transcript regardless of which pane
+                // owns keyboard focus. 3 rows per notch matches the
+                // convention most modern terminals use for line-mode wheel.
+                match m.kind {
+                    MouseEventKind::ScrollUp => state.scroll_up(3),
+                    MouseEventKind::ScrollDown => state.scroll_down(3),
+                    _ => {}
                 }
             }
             AppEvent::Terminal(_) => {}

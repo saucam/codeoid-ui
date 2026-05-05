@@ -29,6 +29,10 @@ pub struct MessageStore {
     /// the cache key in [`crate::state::RenderCache`] so cached styled
     /// lines stay valid until the underlying message changes.
     versions: HashMap<String, u64>,
+    /// Per-session epoch, bumped on any mutation that affects the
+    /// session's transcript. Lets the scrollback assembled-lines cache
+    /// skip work in O(1) when nothing has changed since last frame.
+    session_epoch: HashMap<String, u64>,
 }
 
 impl MessageStore {
@@ -47,16 +51,31 @@ impl MessageStore {
         self.versions.get(message_id).copied().unwrap_or(0)
     }
 
+    /// Monotonic epoch for a whole session. Bumped on any mutation to
+    /// the session's transcript. Returns 0 for sessions we've never
+    /// seen, which trivially mismatches any cached non-zero epoch.
+    #[must_use]
+    pub fn epoch_of_session(&self, session_id: &str) -> u64 {
+        self.session_epoch.get(session_id).copied().unwrap_or(0)
+    }
+
     fn bump(&mut self, message_id: &str) {
         let entry = self.versions.entry(message_id.to_string()).or_insert(0);
         *entry = entry.wrapping_add(1);
     }
 
+    fn bump_session(&mut self, session_id: &str) {
+        let entry = self.session_epoch.entry(session_id.to_string()).or_insert(0);
+        *entry = entry.wrapping_add(1);
+    }
+
     pub fn apply_message(&mut self, msg: SessionMessage) {
         let mid = msg.message_id.clone();
+        let sid = msg.session_id.clone();
         let buf = self.by_session.entry(msg.session_id.clone()).or_default();
         upsert(buf, msg);
         self.bump(&mid);
+        self.bump_session(&sid);
     }
 
     /// Apply a streaming delta. Drops with a `debug!` trace when we don't
@@ -128,7 +147,9 @@ impl MessageStore {
         target.timestamp = delta.timestamp;
 
         let mid = delta.message_id.clone();
+        let sid = delta.session_id.clone();
         self.bump(&mid);
+        self.bump_session(&sid);
     }
 
     pub fn replace_scrollback(&mut self, session_id: String, messages: Vec<SessionMessage>) {
@@ -138,6 +159,7 @@ impl MessageStore {
         for m in &messages {
             self.bump(&m.message_id);
         }
+        self.bump_session(&session_id);
         self.by_session.insert(session_id, messages);
     }
 

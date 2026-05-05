@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::render::{
-    parse_ansi, render_markdown_block, render_tool_block, sanitize_for_display, total_rendered_rows,
+    parse_ansi, render_markdown_block, render_tool_block, sanitize_for_display,
 };
 use crate::state::{AppState, Focus};
 
@@ -58,23 +58,50 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let viewport_rows: usize = viewport_rows_u16.into(); // minus T+B border
     state.last_viewport_rows = viewport_rows_u16;
 
-    // Build the line buffer in a scope so the split-borrow on
-    // `state.messages` + `state.render_cache` is released before we
-    // mutate the scroll fields below.
-    let lines: Vec<Line<'static>> = {
+    // Decide whether the frame-to-frame assembled-lines cache is usable.
+    // Hits eliminate the per-message walk + per-message render-cache
+    // lookup + total-rendered-rows recomputation entirely. Tier 1 of the
+    // perf plan — cache miss falls back to the same rebuild path the
+    // renderer used unconditionally before.
+    let epoch = state.messages.epoch_of_session(&session_id);
+
+    // Animated content (running tool spinners, elapsed-time counters)
+    // must repaint every tick. If any focused-session message is
+    // animating, force a rebuild so the spinner actually advances.
+    let any_animating = state
+        .messages
+        .messages(&session_id)
+        .iter()
+        .any(is_animating);
+
+    let cache_hit = !any_animating
+        && state
+            .scrollback_build
+            .matches(&session_id, inner_width, epoch);
+
+    if !cache_hit {
+        // Rebuild: split-borrow `messages` + `render_cache` +
+        // `scrollback_build` (disjoint fields, so Rust accepts this
+        // simultaneously via the destructuring pattern).
         let AppState {
             ref messages,
             ref mut render_cache,
+            ref mut scrollback_build,
             ..
         } = *state;
 
         let msgs = messages.messages(&session_id);
+
+        // Bound the per-message render cache to the focused session's
+        // live ids. Without this it grows monotonically across
+        // rotations / session switches and `apply_delta` lookups
+        // gradually slow down — visible as prompt lag after many turns.
+        let live_ids: std::collections::HashSet<String> =
+            msgs.iter().map(|m| m.message_id.clone()).collect();
+        render_cache.retain_only(&live_ids);
+
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(msgs.len() * 4);
         for m in msgs {
-            // Animation-driven content (running tool spinner, elapsed-
-            // time counter) must re-render every tick. Everything else
-            // is cached by (message_id, version, width) and reused
-            // across frames.
             let skip_cache = is_animating(m);
             let version = messages.version_of(&m.message_id);
             let rendered = render_cache.get_or_render(
@@ -85,9 +112,9 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 || render_message(m, anim_tick),
             );
             if rendered.is_empty() {
-                // Placeholder messages (empty assistant/thinking mid-
-                // stream) don't render in the transcript — the worker
-                // row above the prompt is the single source of
+                // Placeholder messages (empty assistant/thinking
+                // mid-stream) don't render in the transcript — the
+                // worker row above the prompt is the single source of
                 // "something is happening".
                 continue;
             }
@@ -107,19 +134,28 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 ),
             ]));
         }
-        lines
-    };
 
-    // Scroll math in RENDERED rows. `total_rendered_rows` accounts for
-    // unicode width (CJK = 2 cols), tab expansion, and word-wrap so
-    // stick-to-bottom is exact even on wrapped / wide-char output.
-    //
-    // While the user is scrolled up (Anchored mode), `note_total_rendered`
-    // bumps `scroll_offset` by however many rows arrived at the bottom
-    // since the previous frame, so the visible window stays pinned to
-    // the content the user was reading. Bottom mode (offset = 0) just
+        // Use Paragraph's own line_count so we never disagree with the
+        // widget that actually lays out the content — a hand-rolled row
+        // counter that under-reports by even one row clips the bottom
+        // of the transcript at scroll_offset = 0.
+        let total = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(inner_width);
+        scrollback_build.session_id = Some(session_id.clone());
+        scrollback_build.width = inner_width;
+        scrollback_build.epoch = epoch;
+        scrollback_build.lines = lines;
+        scrollback_build.total_rendered_rows = total;
+    }
+
+    // Scroll math reuses the precomputed total. While the user is
+    // scrolled up (Anchored mode), `note_total_rendered` bumps
+    // `scroll_offset` by however many rows arrived at the bottom since
+    // the previous frame, so the visible window stays pinned to the
+    // content the user was reading. Bottom mode (offset = 0) just
     // follows the latest row.
-    let total_rendered = total_rendered_rows(&lines, inner_width);
+    let total_rendered = state.scrollback_build.total_rendered_rows;
     state.note_total_rendered(total_rendered);
 
     let max_y = total_rendered.saturating_sub(viewport_rows);
@@ -127,6 +163,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .saturating_sub(state.scroll_offset as usize)
         .min(u16::MAX as usize) as u16;
 
+    // Paragraph::new requires `Vec<Line>` by value, so we clone the
+    // outer Vec from the cache. The Tier 2 / custom-widget path
+    // eliminates this clone entirely, but it's already an order of
+    // magnitude cheaper than re-running the per-message renderer.
+    let lines = state.scrollback_build.lines.clone();
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((y, 0))

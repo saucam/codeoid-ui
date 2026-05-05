@@ -10,6 +10,7 @@
 
 pub mod messages;
 pub mod render_cache;
+pub mod scrollback_build;
 pub mod sessions;
 
 use std::collections::{HashMap, HashSet};
@@ -19,6 +20,7 @@ use tui_textarea::TextArea;
 
 use self::messages::MessageStore;
 use self::render_cache::RenderCache;
+use self::scrollback_build::ScrollbackBuild;
 use self::sessions::SessionList;
 
 /// Entire UI state. Every mutation goes through a single `apply_*` method
@@ -73,6 +75,13 @@ pub struct AppState {
     /// survives across frames; invalidated by message version + width.
     /// See [`RenderCache`] for the keying rules.
     pub render_cache: RenderCache,
+    /// Frame-to-frame cache of the *assembled* scrollback (every
+    /// visible message's lines concatenated + the `total_rendered_rows`
+    /// count for scroll math). Hits whenever the focused session, its
+    /// epoch, and the viewport width are all unchanged — i.e. on every
+    /// keystroke into the prompt and every idle frame. See
+    /// [`ScrollbackBuild`] for the keying rules.
+    pub scrollback_build: ScrollbackBuild,
 }
 
 impl std::fmt::Debug for AppState {
@@ -125,6 +134,7 @@ impl AppState {
             attached: HashSet::new(),
             connection: ConnectionState::Connected,
             render_cache: RenderCache::default(),
+            scrollback_build: ScrollbackBuild::default(),
         }
     }
 

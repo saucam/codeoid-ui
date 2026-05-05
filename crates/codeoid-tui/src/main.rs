@@ -20,7 +20,9 @@ use std::io;
 use anyhow::{Context, Result};
 use clap::Parser;
 use codeoid_client::resolve_token;
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -54,6 +56,13 @@ struct Cli {
     /// Path to write a file log (tracing). Stderr is reserved for the TUI.
     #[arg(long, env = "CODEOID_LOG_FILE")]
     log_file: Option<std::path::PathBuf>,
+
+    /// Disable mouse capture. With capture on (default) the wheel scrolls
+    /// the transcript regardless of focus; with capture off, your terminal
+    /// handles wheel + click-drag selection natively (Shift+drag also
+    /// works for selection while capture is enabled).
+    #[arg(long, env = "CODEOID_NO_MOUSE")]
+    no_mouse: bool,
 }
 
 #[tokio::main]
@@ -65,9 +74,10 @@ async fn main() -> Result<()> {
         .await
         .context("failed to resolve auth token")?;
 
-    let mut terminal = setup_terminal()?;
+    let mouse = !cli.no_mouse;
+    let mut terminal = setup_terminal(mouse)?;
     let res = App::new(cli.url, token).run(&mut terminal).await;
-    restore_terminal(&mut terminal)?;
+    restore_terminal(&mut terminal, mouse)?;
     res
 }
 
@@ -101,30 +111,44 @@ fn init_tracing(log_file: Option<&std::path::Path>) -> Result<()> {
     Ok(())
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+fn setup_terminal(mouse: bool) -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    // Intentionally NOT enabling mouse capture. Without it:
-    //   - Click-drag text selection (copy/paste) works natively.
-    //   - Most modern terminals (iTerm2, Alacritty, WezTerm, Kitty,
-    //     Ghostty) still emit wheel events as arrow-key escapes inside
-    //     the alternate screen, so scroll still functions — it just
-    //     routes via keyboard rather than mouse-routed events.
-    //
-    // If you need in-app mouse routing later, gate it behind a CLI flag
-    // so the default experience stays copy-paste friendly.
     // Bracketed paste tells the terminal to wrap pasted text in escape
     // markers so we receive it as a single Event::Paste(String) instead
     // of a stream of keypresses — without this, embedded newlines in a
     // paste each fire SubmitPrompt.
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    //
+    // Mouse capture (when enabled) lets us route wheel events to the
+    // transcript regardless of which pane is focused. Tradeoff: the
+    // terminal stops handling click-drag selection natively. Most modern
+    // terminals fall back to "Shift+drag = native selection" while
+    // capture is on, which is the standard convention used by Helix,
+    // Zellij, and Alacritty-with-mouse.
+    if mouse {
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
+    } else {
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    }
     let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     Ok(terminal)
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+fn restore_terminal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    mouse: bool,
+) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen)?;
+    if mouse {
+        execute!(
+            terminal.backend_mut(),
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        )?;
+    } else {
+        execute!(terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen)?;
+    }
     terminal.show_cursor()?;
     Ok(())
 }
