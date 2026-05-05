@@ -10,7 +10,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 /// All Codeoid session scopes — matches `ALL_SCOPES_STRING` on the TS side.
-const ALL_SCOPES: &str = "session:create session:attach session:watch session:send session:interrupt session:approve session:destroy session:list";
+const ALL_SCOPES: &str = "session:create session:attach session:watch session:send session:interrupt session:approve session:destroy session:list fs:read";
 
 #[derive(Debug, Error)]
 pub enum AuthError {
