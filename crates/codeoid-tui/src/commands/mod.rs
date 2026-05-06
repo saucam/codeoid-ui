@@ -40,6 +40,17 @@ pub enum SlashCommand {
     Help,
     /// `/clear` — clear the prompt buffer.
     Clear,
+    /// `/agents` `/skills` `/mcp` `/hooks` — open the capabilities
+    /// modal scrolled to the relevant tab.
+    Capabilities(CapabilitiesTab),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilitiesTab {
+    Agents,
+    Skills,
+    Mcp,
+    Hooks,
 }
 
 /// Errors returned by [`parse`]. Distinguish "not a command" (returns `Ok(None)`
@@ -118,6 +129,10 @@ pub fn parse(text: &str) -> Result<Option<SlashCommand>, ParseError> {
         "rotate" => SlashCommand::Rotate,
         "help" | "h" | "?" => SlashCommand::Help,
         "clear" | "cls" => SlashCommand::Clear,
+        "agents" | "agent" => SlashCommand::Capabilities(CapabilitiesTab::Agents),
+        "skills" | "skill" => SlashCommand::Capabilities(CapabilitiesTab::Skills),
+        "mcp" => SlashCommand::Capabilities(CapabilitiesTab::Mcp),
+        "hooks" | "hook" => SlashCommand::Capabilities(CapabilitiesTab::Hooks),
         "mode" => {
             let arg = rest_of_line.first().copied().ok_or(ParseError::ModeMissingArg)?;
             let mode = match arg {
@@ -147,6 +162,10 @@ pub const CATALOG: &[(&str, &str)] = &[
     ("/rotate", "rotate the backing context"),
     ("/help", "show the help modal"),
     ("/clear", "clear the prompt"),
+    ("/agents", "list subagents loaded for this session"),
+    ("/skills", "list slash-skill commands"),
+    ("/mcp", "list MCP servers wired in"),
+    ("/hooks", "list PreToolUse / PostToolUse hooks"),
 ];
 
 /// Entries whose command name (before the first space) is a prefix match

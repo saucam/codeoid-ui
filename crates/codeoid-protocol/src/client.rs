@@ -114,6 +114,12 @@ pub enum ClientMessage {
         session_id: String,
         name: String,
     },
+
+    /// Snapshot of Claude Code config (`~/.claude/` + workdir `.claude/`)
+    /// for the focused session — agents, skills, MCP servers, hooks.
+    /// Daemon answers with `ClaudeConfigResult`.
+    #[serde(rename = "claude.config", rename_all = "camelCase")]
+    ClaudeConfig { id: String, session_id: String },
 }
 
 impl ClientMessage {
@@ -136,7 +142,8 @@ impl ClientMessage {
             | Self::SessionRotate { id, .. }
             | Self::SessionSearch { id, .. }
             | Self::SessionSetModel { id, .. }
-            | Self::SessionRename { id, .. } => id,
+            | Self::SessionRename { id, .. }
+            | Self::ClaudeConfig { id, .. } => id,
         }
     }
 }

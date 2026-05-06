@@ -278,6 +278,48 @@ pub enum Focus {
 pub enum Modal {
     Help,
     ConfirmDestroy { session_id: String, name: String },
+    Capabilities(CapabilitiesModal),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilitiesTab {
+    Agents,
+    Skills,
+    Mcp,
+    Hooks,
+}
+
+#[derive(Debug, Clone)]
+pub struct CapabilitiesModal {
+    pub tab: CapabilitiesTab,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub workdir: Option<String>,
+    pub agents: Vec<codeoid_protocol::ClaudeConfigAgent>,
+    pub skills: Vec<codeoid_protocol::ClaudeConfigSkill>,
+    pub mcp_servers: Vec<codeoid_protocol::ClaudeConfigMcpServer>,
+    pub hooks: Vec<codeoid_protocol::ClaudeConfigHook>,
+    /// Pending request id we're waiting on; used to drop stale results.
+    pub pending_request_id: Option<String>,
+    /// Selected row index within the active tab — for keyboard nav.
+    pub selected: usize,
+}
+
+impl CapabilitiesModal {
+    pub fn new(tab: CapabilitiesTab) -> Self {
+        Self {
+            tab,
+            loading: true,
+            error: None,
+            workdir: None,
+            agents: vec![],
+            skills: vec![],
+            mcp_servers: vec![],
+            hooks: vec![],
+            pending_request_id: None,
+            selected: 0,
+        }
+    }
 }
 
 #[cfg(test)]

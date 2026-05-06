@@ -84,9 +84,72 @@ pub enum DaemonMessage {
         limit: u32,
     },
 
+    #[serde(rename = "claude.config.result", rename_all = "camelCase")]
+    ClaudeConfigResult {
+        request_id: String,
+        workdir: String,
+        agents: Vec<ClaudeConfigAgent>,
+        skills: Vec<ClaudeConfigSkill>,
+        mcp_servers: Vec<ClaudeConfigMcpServer>,
+        hooks: Vec<ClaudeConfigHook>,
+    },
+
     /// Forward-compat sink. Preserves raw JSON so the TUI can log it.
     #[serde(other)]
     Unknown,
+}
+
+/// Where the config entry was loaded from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeConfigScope {
+    Global,
+    Workdir,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeConfigAgent {
+    pub name: String,
+    pub description: Option<String>,
+    pub path: String,
+    pub scope: ClaudeConfigScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeConfigSkill {
+    pub name: String,
+    pub description: Option<String>,
+    pub path: String,
+    pub scope: ClaudeConfigScope,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeConfigMcpServer {
+    pub name: String,
+    pub scope: ClaudeConfigScope,
+    pub path: String,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env_keys: Vec<String>,
+    pub url: Option<String>,
+    #[serde(rename = "type")]
+    pub server_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeConfigHook {
+    pub event: String,
+    pub scope: ClaudeConfigScope,
+    pub path: String,
+    pub matcher: Option<String>,
+    pub kind: String,
+    pub command: String,
 }
 
 /// Sent after a successful auth handshake, before any other traffic.

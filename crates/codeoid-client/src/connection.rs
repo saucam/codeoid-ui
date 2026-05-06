@@ -379,6 +379,7 @@ fn daemon_kind(msg: &DaemonMessage) -> &'static str {
         DaemonMessage::SessionInfoUpdate { .. } => "session.info_update",
         DaemonMessage::ScrollbackReplay { .. } => "scrollback.replay",
         DaemonMessage::SessionSearchResult { .. } => "session.search.result",
+        DaemonMessage::ClaudeConfigResult { .. } => "claude.config.result",
         DaemonMessage::Unknown => "unknown",
     }
 }
@@ -400,5 +401,6 @@ fn client_kind(msg: &ClientMessage) -> &'static str {
         ClientMessage::SessionSearch { .. } => "session.search",
         ClientMessage::SessionSetModel { .. } => "session.set_model",
         ClientMessage::SessionRename { .. } => "session.rename",
+        ClientMessage::ClaudeConfig { .. } => "claude.config",
     }
 }

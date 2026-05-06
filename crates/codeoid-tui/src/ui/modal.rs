@@ -6,19 +6,25 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::state::{AppState, Modal};
+use crate::state::{AppState, CapabilitiesModal, CapabilitiesTab, Modal};
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     // Signature matches the scope needed here; the rest of the tree can
     // borrow mutably without hitting this widget.
     let Some(modal) = &state.modal else { return };
-    let area = centered(frame.area(), 60, 50);
+
+    // Capabilities deserves more screen real estate for the entries.
+    let area = match modal {
+        Modal::Capabilities(_) => centered(frame.area(), 80, 75),
+        _ => centered(frame.area(), 60, 50),
+    };
 
     frame.render_widget(Clear, area);
 
     match modal {
         Modal::Help => render_help(frame, area),
         Modal::ConfirmDestroy { name, .. } => render_confirm_destroy(frame, area, name),
+        Modal::Capabilities(c) => render_capabilities(frame, area, c),
     }
 }
 
@@ -97,6 +103,242 @@ fn render_confirm_destroy(frame: &mut Frame<'_>, area: Rect, name: &str) {
                 .border_style(Style::default().fg(Color::Red)),
         );
     frame.render_widget(p, area);
+}
+
+fn render_capabilities(frame: &mut Frame<'_>, area: Rect, c: &CapabilitiesModal) {
+    let title = match c.tab {
+        CapabilitiesTab::Agents => " Capabilities — Agents ",
+        CapabilitiesTab::Skills => " Capabilities — Skills ",
+        CapabilitiesTab::Mcp => " Capabilities — MCP servers ",
+        CapabilitiesTab::Hooks => " Capabilities — Hooks ",
+    };
+
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    rows.push(Line::from(vec![
+        tab_pill("Agents", matches!(c.tab, CapabilitiesTab::Agents), c.agents.len()),
+        Span::raw("  "),
+        tab_pill("Skills", matches!(c.tab, CapabilitiesTab::Skills), c.skills.len()),
+        Span::raw("  "),
+        tab_pill("MCP", matches!(c.tab, CapabilitiesTab::Mcp), c.mcp_servers.len()),
+        Span::raw("  "),
+        tab_pill("Hooks", matches!(c.tab, CapabilitiesTab::Hooks), c.hooks.len()),
+    ]));
+    if let Some(workdir) = &c.workdir {
+        rows.push(Line::from(vec![
+            Span::styled("workdir ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                workdir.clone(),
+                Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+            ),
+        ]));
+    }
+    rows.push(Line::raw(""));
+
+    if c.loading {
+        rows.push(Line::from(Span::styled(
+            "loading…",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else if let Some(err) = &c.error {
+        rows.push(Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    } else {
+        match c.tab {
+            CapabilitiesTab::Agents => {
+                if c.agents.is_empty() {
+                    rows.push(empty_hint("No subagents loaded."));
+                } else {
+                    for a in &c.agents {
+                        rows.push(item_header(&a.name, scope_label(a.scope)));
+                        if let Some(d) = &a.description {
+                            rows.push(item_desc(d));
+                        }
+                        if let Some(tools) = &a.tools {
+                            if !tools.is_empty() {
+                                rows.push(Line::from(vec![
+                                    Span::raw("    "),
+                                    Span::styled(
+                                        "tools: ",
+                                        Style::default().fg(Color::DarkGray),
+                                    ),
+                                    Span::styled(
+                                        tools.join(", "),
+                                        Style::default().fg(Color::Gray),
+                                    ),
+                                ]));
+                            }
+                        }
+                        rows.push(item_path(&a.path));
+                        rows.push(Line::raw(""));
+                    }
+                }
+            }
+            CapabilitiesTab::Skills => {
+                if c.skills.is_empty() {
+                    rows.push(empty_hint("No skills loaded."));
+                } else {
+                    for s in &c.skills {
+                        rows.push(item_header(&format!("/{}", s.name), scope_label(s.scope)));
+                        if let Some(d) = &s.description {
+                            rows.push(item_desc(d));
+                        }
+                        rows.push(item_path(&s.path));
+                        rows.push(Line::raw(""));
+                    }
+                }
+            }
+            CapabilitiesTab::Mcp => {
+                if c.mcp_servers.is_empty() {
+                    rows.push(empty_hint(
+                        "No MCP servers configured. Add an `mcpServers` block to settings.json.",
+                    ));
+                } else {
+                    for m in &c.mcp_servers {
+                        rows.push(item_header(&m.name, scope_label(m.scope)));
+                        if let Some(cmd) = &m.command {
+                            let line = if m.args.is_empty() {
+                                cmd.clone()
+                            } else {
+                                format!("{cmd} {}", m.args.join(" "))
+                            };
+                            rows.push(Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled(line, Style::default().fg(Color::Gray)),
+                            ]));
+                        }
+                        if let Some(url) = &m.url {
+                            rows.push(Line::from(vec![
+                                Span::raw("    url: "),
+                                Span::styled(url.clone(), Style::default().fg(Color::Gray)),
+                            ]));
+                        }
+                        if !m.env_keys.is_empty() {
+                            rows.push(Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled(
+                                    format!("env keys (redacted): {}", m.env_keys.join(", ")),
+                                    Style::default().fg(Color::DarkGray),
+                                ),
+                            ]));
+                        }
+                        rows.push(item_path(&m.path));
+                        rows.push(Line::raw(""));
+                    }
+                }
+            }
+            CapabilitiesTab::Hooks => {
+                if c.hooks.is_empty() {
+                    rows.push(empty_hint("No hooks configured."));
+                } else {
+                    for h in &c.hooks {
+                        let mut header_line = vec![
+                            Span::raw("  "),
+                            Span::styled(
+                                h.event.clone(),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw("  "),
+                            scope_pill(h.scope),
+                        ];
+                        if let Some(matcher) = &h.matcher {
+                            header_line.push(Span::raw("  "));
+                            header_line.push(Span::styled(
+                                matcher.clone(),
+                                Style::default().fg(Color::Magenta),
+                            ));
+                        }
+                        rows.push(Line::from(header_line));
+                        rows.push(Line::from(vec![
+                            Span::raw("    "),
+                            Span::styled(h.command.clone(), Style::default().fg(Color::Gray)),
+                        ]));
+                        rows.push(item_path(&h.path));
+                        rows.push(Line::raw(""));
+                    }
+                }
+            }
+        }
+    }
+
+    let p = Paragraph::new(rows).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .title_alignment(Alignment::Center),
+    );
+    frame.render_widget(p, area);
+}
+
+fn tab_pill(label: &'static str, active: bool, count: usize) -> Span<'static> {
+    let style = if active {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Span::styled(format!(" {label} {count} "), style)
+}
+
+fn item_header(name: &str, scope: &'static str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            name.to_string(),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        scope_pill_str(scope),
+    ])
+}
+
+fn item_desc(desc: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("    "),
+        Span::styled(desc.to_string(), Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn item_path(p: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("    "),
+        Span::styled(p.to_string(), Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+    ])
+}
+
+fn empty_hint(text: &'static str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(text, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+    ])
+}
+
+fn scope_label(scope: codeoid_protocol::ClaudeConfigScope) -> &'static str {
+    match scope {
+        codeoid_protocol::ClaudeConfigScope::Workdir => "ws",
+        codeoid_protocol::ClaudeConfigScope::Global => "global",
+    }
+}
+
+fn scope_pill(scope: codeoid_protocol::ClaudeConfigScope) -> Span<'static> {
+    scope_pill_str(scope_label(scope))
+}
+
+fn scope_pill_str(label: &'static str) -> Span<'static> {
+    let (fg, bg) = if label == "ws" {
+        (Color::Black, Color::Cyan)
+    } else {
+        (Color::White, Color::DarkGray)
+    };
+    Span::styled(
+        format!(" {label} "),
+        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+    )
 }
 
 fn heading(text: &'static str) -> Line<'static> {

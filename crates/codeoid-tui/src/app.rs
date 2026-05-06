@@ -357,6 +357,30 @@ impl App {
             | DaemonMessage::ResponseOk { .. } => {
                 // Solicited; handled by the request registry.
             }
+            DaemonMessage::ClaudeConfigResult {
+                request_id,
+                workdir,
+                agents,
+                skills,
+                mcp_servers,
+                hooks,
+            } => {
+                if let Some(Modal::Capabilities(m)) = state.modal.as_mut() {
+                    // Drop stale results — user may have closed the modal
+                    // and reopened with a different request id.
+                    if m.pending_request_id.as_deref() == Some(request_id.as_str()) {
+                        m.loading = false;
+                        m.error = None;
+                        m.workdir = Some(workdir);
+                        m.agents = agents;
+                        m.skills = skills;
+                        m.mcp_servers = mcp_servers;
+                        m.hooks = hooks;
+                        m.pending_request_id = None;
+                        m.selected = 0;
+                    }
+                }
+            }
             DaemonMessage::Unknown => {
                 warn!("received unknown daemon message; forward-compat drop");
             }
@@ -523,6 +547,47 @@ impl App {
             }
             SlashCommand::Clear => {
                 // take_prompt already drained the editor; nothing else to do.
+            }
+            SlashCommand::Capabilities(tab) => {
+                self.open_capabilities(tab).await;
+            }
+        }
+    }
+
+    async fn open_capabilities(&mut self, tab: crate::commands::CapabilitiesTab) {
+        let session_id = self
+            .state
+            .as_ref()
+            .and_then(|s| s.sessions.focused_id().map(ToString::to_string));
+        let Some(session_id) = session_id else {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error("no session focused — capabilities need a session");
+            }
+            return;
+        };
+        let modal_tab = match tab {
+            crate::commands::CapabilitiesTab::Agents => crate::state::CapabilitiesTab::Agents,
+            crate::commands::CapabilitiesTab::Skills => crate::state::CapabilitiesTab::Skills,
+            crate::commands::CapabilitiesTab::Mcp => crate::state::CapabilitiesTab::Mcp,
+            crate::commands::CapabilitiesTab::Hooks => crate::state::CapabilitiesTab::Hooks,
+        };
+        let request_id = ClientHandle::next_request_id();
+        if let Some(state) = self.state.as_mut() {
+            let mut modal = crate::state::CapabilitiesModal::new(modal_tab);
+            modal.pending_request_id = Some(request_id.clone());
+            state.modal = Some(Modal::Capabilities(modal));
+        }
+        let Some(handle) = self.handle.clone() else { return };
+        let msg = ClientMessage::ClaudeConfig {
+            id: request_id,
+            session_id,
+        };
+        if let Err(e) = handle.send(msg).await {
+            if let Some(state) = self.state.as_mut() {
+                if let Some(Modal::Capabilities(m)) = state.modal.as_mut() {
+                    m.loading = false;
+                    m.error = Some(format!("failed to send: {e}"));
+                }
             }
         }
     }
