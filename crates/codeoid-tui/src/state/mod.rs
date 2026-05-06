@@ -82,14 +82,24 @@ pub struct AppState {
     /// keystroke into the prompt and every idle frame. See
     /// [`ScrollbackBuild`] for the keying rules.
     pub scrollback_build: ScrollbackBuild,
-    /// When true, tool output bodies render at their full length; when
-    /// false (default), they render in collapsed form (a few lines + a
-    /// "+N more" tail) so the user can scan agent + user turns without
-    /// drowning in `cargo build` or `find` dumps. Toggled with `v` in
-    /// transcript focus. Mirrors the web UI's expand-on-click behaviour;
-    /// global rather than per-block here because the TUI doesn't have
-    /// block-level cursor selection yet.
+    /// Global override for tool-output truncation. When true, every tool
+    /// body renders fully (still capped at the verbose ceiling so a
+    /// 10 000-line `find` doesn't melt the renderer). When false, the
+    /// per-block `expanded_tool_message_ids` set is consulted instead so
+    /// the user can pop individual blocks open. Toggled with `v`.
     pub verbose_tool_output: bool,
+    /// Per-tool-block expand state for the "click to expand" equivalent
+    /// in the TUI. Keys are the `tool_call` message ids whose bodies the
+    /// user opted to render in full. Mirrors the web UI's
+    /// click-to-expand behaviour, except keyed off `[`/`]` navigation +
+    /// `Enter` to toggle, and only consulted when the global verbose
+    /// override is off.
+    pub expanded_tool_message_ids: HashSet<String>,
+    /// Currently-selected tool block — the one `Enter` will expand /
+    /// collapse. `]` and `[` walk through the tool_call messages of the
+    /// focused session. `None` means "no explicit selection yet" and
+    /// `Enter` falls back to the most recent tool_call message.
+    pub selected_tool_message_id: Option<String>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -144,7 +154,86 @@ impl AppState {
             render_cache: RenderCache::default(),
             scrollback_build: ScrollbackBuild::default(),
             verbose_tool_output: false,
+            expanded_tool_message_ids: HashSet::new(),
+            selected_tool_message_id: None,
         }
+    }
+
+    /// Tool_call message ids in the focused session, in transcript
+    /// order. Used by `[` / `]` / `Enter` to walk and toggle individual
+    /// tool blocks when the global verbose override is off.
+    pub fn focused_tool_call_ids(&self) -> Vec<String> {
+        let Some(sid) = self.sessions.focused_id() else {
+            return Vec::new();
+        };
+        self.messages
+            .messages(sid)
+            .iter()
+            .filter(|m| matches!(m.role, codeoid_protocol::MessageRole::ToolCall))
+            .map(|m| m.message_id.clone())
+            .collect()
+    }
+
+    /// Move the tool-block selection to the next or previous tool_call.
+    /// Wraps at both ends. With no current selection, jumps to the last
+    /// (newest) on next-press and the first on prev-press so the
+    /// keybinding does something sensible from a cold start.
+    pub fn cycle_tool_block_selection(&mut self, forward: bool) {
+        let ids = self.focused_tool_call_ids();
+        if ids.is_empty() {
+            self.selected_tool_message_id = None;
+            return;
+        }
+        let prev_selected = self.selected_tool_message_id.clone();
+        let next = match self.selected_tool_message_id.as_deref() {
+            Some(cur) => match ids.iter().position(|id| id == cur) {
+                Some(idx) if forward => ids[(idx + 1) % ids.len()].clone(),
+                Some(idx) => ids[(idx + ids.len() - 1) % ids.len()].clone(),
+                None => {
+                    if forward {
+                        ids[0].clone()
+                    } else {
+                        ids[ids.len() - 1].clone()
+                    }
+                }
+            },
+            None => {
+                if forward {
+                    ids[ids.len() - 1].clone()
+                } else {
+                    ids[0].clone()
+                }
+            }
+        };
+        self.selected_tool_message_id = Some(next.clone());
+        // Both the old and new selected blocks render with a different
+        // header style, so invalidate per-message caches for them.
+        if let Some(old) = prev_selected {
+            self.render_cache.invalidate(&old);
+        }
+        self.render_cache.invalidate(&next);
+        self.scrollback_build.clear();
+    }
+
+    /// Toggle the per-block expand state for the current selection.
+    /// Falls back to the most recent tool_call if nothing is selected
+    /// yet — the "expand the latest output" expectation when the user
+    /// just presses `Enter` from the bottom of the transcript without
+    /// having navigated.
+    pub fn toggle_expand_selected_tool_block(&mut self) {
+        let target = self
+            .selected_tool_message_id
+            .clone()
+            .or_else(|| self.focused_tool_call_ids().last().cloned());
+        let Some(id) = target else { return };
+        if self.expanded_tool_message_ids.contains(&id) {
+            self.expanded_tool_message_ids.remove(&id);
+        } else {
+            self.expanded_tool_message_ids.insert(id.clone());
+        }
+        self.selected_tool_message_id = Some(id.clone());
+        self.render_cache.invalidate(&id);
+        self.scrollback_build.clear();
     }
 
     /// Drain the prompt into a `String` and reset the editor. Returns

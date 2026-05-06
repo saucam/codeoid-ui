@@ -54,6 +54,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
 
     let anim_tick = state.anim_tick;
     let verbose_tools = state.verbose_tool_output;
+    let expanded_ids = state.expanded_tool_message_ids.clone();
+    let selected_id = state.selected_tool_message_id.clone();
     let inner_width = area.width.saturating_sub(2).max(1); // minus L+R border
     let viewport_rows_u16 = area.height.saturating_sub(2);
     let viewport_rows: usize = viewport_rows_u16.into(); // minus T+B border
@@ -105,12 +107,21 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         for m in msgs {
             let skip_cache = is_animating(m);
             let version = messages.version_of(&m.message_id);
+            let per_block_expanded = expanded_ids.contains(&m.message_id);
+            let is_selected = selected_id.as_deref() == Some(m.message_id.as_str());
             let rendered = render_cache.get_or_render(
                 &m.message_id,
                 version,
                 inner_width,
                 skip_cache,
-                || render_message(m, anim_tick, verbose_tools),
+                || {
+                    render_message(
+                        m,
+                        anim_tick,
+                        verbose_tools || per_block_expanded,
+                        is_selected,
+                    )
+                },
             );
             if rendered.is_empty() {
                 // Placeholder messages (empty assistant/thinking
@@ -230,7 +241,12 @@ fn session_title(session: &SessionInfo) -> Line<'static> {
 /// duplicate spinner. The tool card's per-tool phase indicator IS kept,
 /// since it conveys per-tool lifecycle (which tool is still running),
 /// not session-level busyness.
-fn render_message(m: &SessionMessage, anim_tick: u64, verbose_tools: bool) -> Vec<Line<'static>> {
+fn render_message(
+    m: &SessionMessage,
+    anim_tick: u64,
+    verbose_tools: bool,
+    is_selected: bool,
+) -> Vec<Line<'static>> {
     // Skip placeholder messages that will be filled in by streaming
     // deltas. The header reappears once content or parts arrive.
     let has_payload = !m.content.is_empty()
@@ -246,7 +262,13 @@ fn render_message(m: &SessionMessage, anim_tick: u64, verbose_tools: bool) -> Ve
     match m.role {
         MessageRole::ToolCall => {
             if let Some(tool) = &m.tool {
-                out.extend(render_tool_block(tool, anim_tick, BODY_INDENT, verbose_tools));
+                out.extend(render_tool_block(
+                    tool,
+                    anim_tick,
+                    BODY_INDENT,
+                    verbose_tools,
+                    is_selected,
+                ));
             }
             if !m.content.is_empty() {
                 out.extend(render_markdown_block(&m.content, BODY_INDENT));

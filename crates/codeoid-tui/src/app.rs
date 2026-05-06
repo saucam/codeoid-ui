@@ -284,6 +284,9 @@ impl App {
                 state.render_cache.clear();
                 state.scrollback_build.clear();
             }
+            Action::SelectNextToolBlock => state.cycle_tool_block_selection(true),
+            Action::SelectPrevToolBlock => state.cycle_tool_block_selection(false),
+            Action::ToggleExpandSelectedToolBlock => state.toggle_expand_selected_tool_block(),
         }
     }
 

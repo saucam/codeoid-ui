@@ -31,6 +31,15 @@ pub enum Action {
     /// 8-line preview + "+N more" tail) vs full. Bound to `v` in
     /// transcript focus.
     ToggleVerboseToolOutput,
+    /// Move the tool-block selection cursor to the next tool_call in the
+    /// focused session (cyclic). Bound to `]` in transcript focus.
+    SelectNextToolBlock,
+    /// Move the tool-block selection cursor to the previous tool_call.
+    /// Bound to `[` in transcript focus.
+    SelectPrevToolBlock,
+    /// Expand or collapse the currently selected tool block (or the most
+    /// recent one if no selection). Bound to `Enter` in transcript focus.
+    ToggleExpandSelectedToolBlock,
 }
 
 pub fn resolve(
@@ -113,6 +122,9 @@ pub fn resolve(
         (Up, _) | (Char('k'), KeyModifiers::NONE) => Some(Action::ScrollUp),
         (Down, _) | (Char('j'), KeyModifiers::NONE) => Some(Action::ScrollDown),
         (Char('v'), KeyModifiers::NONE) => Some(Action::ToggleVerboseToolOutput),
+        (Char(']'), KeyModifiers::NONE) => Some(Action::SelectNextToolBlock),
+        (Char('['), KeyModifiers::NONE) => Some(Action::SelectPrevToolBlock),
+        (Enter, KeyModifiers::NONE) => Some(Action::ToggleExpandSelectedToolBlock),
         _ => None,
     }
 }

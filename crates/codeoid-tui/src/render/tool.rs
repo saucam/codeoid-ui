@@ -36,15 +36,24 @@ const MAX_BODY_LINES_COLLAPSED: usize = 8;
 
 /// Render a tool invocation. `indent` is the margin applied to the
 /// header; body content sits at `indent + "  "` so it reads as a
-/// continuation. When `verbose` is true, more of the tool body is
-/// included before truncation kicks in.
+/// continuation.
+///
+/// `expanded` reflects either the global verbose override or this
+/// individual block being explicitly expanded by the user (via `Enter`
+/// while it's the selected block) — either way the body cap goes from
+/// the 8-line collapsed preview to the 40-line verbose ceiling.
+///
+/// `selected` highlights this as the active block in the `[`/`]`
+/// navigation cursor — surfaced as a subtle prefix marker on the
+/// header so users know which block `Enter` is going to toggle.
 pub fn render_tool_block(
     tool: &ToolInfo,
     anim_tick: u64,
     indent: &str,
-    verbose: bool,
+    expanded: bool,
+    selected: bool,
 ) -> Vec<Line<'static>> {
-    let max_body = if verbose {
+    let max_body = if expanded {
         MAX_BODY_LINES_VERBOSE
     } else {
         MAX_BODY_LINES_COLLAPSED
@@ -55,21 +64,47 @@ pub fn render_tool_block(
     let mut out: Vec<Line<'static>> = Vec::new();
 
     // Header: "  ⠋ bash  ·  running · 2.3s"
+    // When `selected`, prepend a cyan `▶ ` marker and render the tool
+    // name with the accent colour so the user knows this is the block
+    // `Enter` will toggle. The marker takes the place of the usual
+    // leading space inside `indent` so the column where the tool name
+    // appears stays aligned with non-selected rows.
     let (icon, icon_style) = header_icon(&tool.state, spinner);
     let _ = seed_from(&tool.tool_id); // keep usage marker
-    out.push(Line::from(vec![
-        Span::raw(indent.to_owned()),
-        Span::styled(icon, icon_style),
-        Span::raw(" "),
-        Span::styled(
-            tool.name.clone(),
+    let mut header_spans: Vec<Span<'static>> = Vec::with_capacity(8);
+    if selected {
+        let trimmed = if indent.len() >= 2 {
+            indent[..indent.len() - 2].to_owned()
+        } else {
+            String::new()
+        };
+        header_spans.push(Span::raw(trimmed));
+        header_spans.push(Span::styled(
+            "▶ ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        header_spans.push(Span::raw(indent.to_owned()));
+    }
+    header_spans.push(Span::styled(icon, icon_style));
+    header_spans.push(Span::raw(" "));
+    header_spans.push(Span::styled(
+        tool.name.clone(),
+        if selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
             Style::default()
                 .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
-        phase_summary(tool, anim_tick),
-    ]));
+                .add_modifier(Modifier::BOLD)
+        },
+    ));
+    header_spans.push(Span::styled("  ·  ", Style::default().fg(Color::DarkGray)));
+    header_spans.push(phase_summary(tool, anim_tick));
+    out.push(Line::from(header_spans));
 
     // Input preview: compact, italic, dim. Only when we have an input.
     if let Some(preview) = input_preview(&tool.state) {
@@ -175,11 +210,16 @@ pub fn render_tool_block(
         out.push(Line::from(spans));
     }
     if total_body > max_body {
-        let tail = if verbose {
+        let tail = if expanded {
             format!("… {} more line(s) truncated", total_body - max_body)
+        } else if selected {
+            format!(
+                "… {} more line(s) hidden — press Enter to expand",
+                total_body - max_body,
+            )
         } else {
             format!(
-                "… {} more line(s) hidden — press v to expand tool output",
+                "… {} more line(s) hidden — [/] to navigate, Enter to expand",
                 total_body - max_body,
             )
         };
