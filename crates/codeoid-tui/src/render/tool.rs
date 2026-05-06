@@ -69,14 +69,49 @@ pub fn render_tool_block(tool: &ToolInfo, anim_tick: u64, indent: &str) -> Vec<L
         ]));
     }
 
-    // Waiting-for-approval: description + key prompt.
-    if let ToolState::WaitingConfirmation { description, .. } = &tool.state {
-        let mut desc_spans = vec![
-            Span::raw(body_indent.clone()),
-            Span::styled("⎯ ", Style::default().fg(Color::Magenta)),
-        ];
-        desc_spans.extend(inline_spans(description, Style::default()));
-        out.push(Line::from(desc_spans));
+    // Waiting-for-approval: description + key prompt. For ExitPlanMode
+    // we render the plan content (markdown-ish, with the indent
+    // prefixed to every line) so the user can actually read what
+    // they're about to approve.
+    if let ToolState::WaitingConfirmation {
+        description, input, ..
+    } = &tool.state
+    {
+        let is_plan_mode = tool.name == "ExitPlanMode" || tool.name == "exit_plan_mode";
+        if is_plan_mode {
+            if let Some(plan) = input.get("plan").and_then(|p| p.as_str()) {
+                out.push(Line::from(vec![
+                    Span::raw(body_indent.clone()),
+                    Span::styled(
+                        "📋 Proposed plan",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                for raw in plan.lines() {
+                    out.push(Line::from(vec![
+                        Span::raw(body_indent.clone()),
+                        Span::styled(raw.to_string(), Style::default().fg(Color::Gray)),
+                    ]));
+                }
+                out.push(Line::raw(""));
+            } else {
+                let mut desc_spans = vec![
+                    Span::raw(body_indent.clone()),
+                    Span::styled("⎯ ", Style::default().fg(Color::Magenta)),
+                ];
+                desc_spans.extend(inline_spans(description, Style::default()));
+                out.push(Line::from(desc_spans));
+            }
+        } else {
+            let mut desc_spans = vec![
+                Span::raw(body_indent.clone()),
+                Span::styled("⎯ ", Style::default().fg(Color::Magenta)),
+            ];
+            desc_spans.extend(inline_spans(description, Style::default()));
+            out.push(Line::from(desc_spans));
+        }
         out.push(Line::from(vec![
             Span::raw(body_indent.clone()),
             Span::styled("Press ", Style::default().fg(Color::DarkGray)),
@@ -86,13 +121,30 @@ pub fn render_tool_block(tool: &ToolInfo, anim_tick: u64, indent: &str) -> Vec<L
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("approve · ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                if is_plan_mode { "approve plan · " } else { "approve · " },
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(
                 "[d] ",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("deny", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                if is_plan_mode { "cancel" } else { "deny" },
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
+        if is_plan_mode {
+            out.push(Line::from(vec![
+                Span::raw(body_indent.clone()),
+                Span::styled(
+                    "  or just type your changes — Claude reads it as the refinement.",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]));
+        }
     }
 
     // Output body — ANSI-parsed so colors survive. Prepend our indent
