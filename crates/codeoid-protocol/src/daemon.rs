@@ -139,6 +139,9 @@ pub struct ClaudeConfigMcpServer {
     pub url: Option<String>,
     #[serde(rename = "type")]
     pub server_type: Option<String>,
+    /// HTTP-type MCP servers' header keys (values redacted at the daemon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_keys: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

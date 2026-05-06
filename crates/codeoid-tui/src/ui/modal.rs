@@ -223,6 +223,20 @@ fn render_capabilities(frame: &mut Frame<'_>, area: Rect, c: &CapabilitiesModal)
                                 ),
                             ]));
                         }
+                        if let Some(headers) = &m.header_keys {
+                            if !headers.is_empty() {
+                                rows.push(Line::from(vec![
+                                    Span::raw("    "),
+                                    Span::styled(
+                                        format!(
+                                            "header keys (redacted): {}",
+                                            headers.join(", ")
+                                        ),
+                                        Style::default().fg(Color::DarkGray),
+                                    ),
+                                ]));
+                            }
+                        }
                         rows.push(item_path(&m.path));
                         rows.push(Line::raw(""));
                     }
