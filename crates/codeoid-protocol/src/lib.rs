@@ -37,10 +37,12 @@ pub mod message;
 pub mod session;
 pub mod tool;
 
-pub use client::{Attachment, ClientMessage, SearchScope, SendPriority};
+pub use client::{Attachment, ClientMessage, SearchScope, SendPriority, SessionImportSource};
 pub use daemon::{
     AuthOkMsg, ClaudeConfigAgent, ClaudeConfigHook, ClaudeConfigMcpServer, ClaudeConfigScope,
-    ClaudeConfigSkill, DaemonMessage, ErrorCode, SessionSearchHit, SessionSearchSnippet,
+    ClaudeConfigSkill, DaemonMessage, ErrorCode, SessionExportCounts, SessionExportManifest,
+    SessionExportMetaSlim, SessionExportPayload, SessionExportWorkdir, SessionSearchHit,
+    SessionSearchSnippet,
 };
 pub use message::{
     ContentPart, IdentityType, MessageIdentity, MessageRole, SessionMessage, SessionMessageDelta,

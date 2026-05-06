@@ -13,6 +13,7 @@
 //! the repetition.
 
 use serde::{Deserialize, Serialize};
+use serde_json;
 
 use crate::session::SessionMode;
 
@@ -120,6 +121,46 @@ pub enum ClientMessage {
     /// Daemon answers with `ClaudeConfigResult`.
     #[serde(rename = "claude.config", rename_all = "camelCase")]
     ClaudeConfig { id: String, session_id: String },
+
+    /// Export a session as a portable `ShareBundle`.
+    #[serde(rename = "session.export", rename_all = "camelCase")]
+    SessionExport {
+        id: String,
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_memory: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_pinned_files: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias_override: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_file: Option<bool>,
+    },
+
+    /// Import a session bundle. The TUI typically uses the `file`
+    /// variant (operator pastes a path); the web pushes inline JSON.
+    #[serde(rename = "session.import", rename_all = "camelCase")]
+    SessionImport {
+        id: String,
+        source: SessionImportSource,
+        target_workdir: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_override: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        write_pinned_files: Option<bool>,
+    },
+}
+
+/// Source of a `session.import` bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SessionImportSource {
+    Inline {
+        bundle: serde_json::Value,
+    },
+    File {
+        path: String,
+    },
 }
 
 impl ClientMessage {
@@ -143,7 +184,9 @@ impl ClientMessage {
             | Self::SessionSearch { id, .. }
             | Self::SessionSetModel { id, .. }
             | Self::SessionRename { id, .. }
-            | Self::ClaudeConfig { id, .. } => id,
+            | Self::ClaudeConfig { id, .. }
+            | Self::SessionExport { id, .. }
+            | Self::SessionImport { id, .. } => id,
         }
     }
 }

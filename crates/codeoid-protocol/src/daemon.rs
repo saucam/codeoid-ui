@@ -94,6 +94,24 @@ pub enum DaemonMessage {
         hooks: Vec<ClaudeConfigHook>,
     },
 
+    #[serde(rename = "session.export.result", rename_all = "camelCase")]
+    SessionExportResult {
+        request_id: String,
+        manifest: SessionExportManifest,
+        payload: SessionExportPayload,
+    },
+
+    #[serde(rename = "session.import.result", rename_all = "camelCase")]
+    SessionImportResult {
+        request_id: String,
+        new_session_id: String,
+        imported_messages: u32,
+        imported_episodes: u32,
+        imported_turns: u32,
+        pinned_files_written: u32,
+        warnings: Vec<String>,
+    },
+
     /// Forward-compat sink. Preserves raw JSON so the TUI can log it.
     #[serde(other)]
     Unknown,
@@ -142,6 +160,57 @@ pub struct ClaudeConfigMcpServer {
     /// HTTP-type MCP servers' header keys (values redacted at the daemon).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_keys: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExportManifest {
+    pub exported_at: String,
+    pub session: SessionExportMetaSlim,
+    pub workdir: SessionExportWorkdir,
+    pub counts: SessionExportCounts,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExportMetaSlim {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExportWorkdir {
+    pub alias: String,
+    pub alias_source: String,
+    pub original_absolute: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExportCounts {
+    pub messages: u32,
+    pub episodes: u32,
+    pub turns: u32,
+    pub pinned_files: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SessionExportPayload {
+    Inline {
+        bundle: serde_json::Value,
+        size_bytes: u64,
+    },
+    File {
+        path: String,
+        size_bytes: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

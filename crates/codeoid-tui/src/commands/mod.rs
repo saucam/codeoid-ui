@@ -43,6 +43,17 @@ pub enum SlashCommand {
     /// `/agents` `/skills` `/mcp` `/hooks` — open the capabilities
     /// modal scrolled to the relevant tab.
     Capabilities(CapabilitiesTab),
+    /// `/export [path]` — write the focused session to a JSON bundle
+    /// (under `~/.codeoid/exports/` by default; or to the given path).
+    Export {
+        path: Option<String>,
+    },
+    /// `/import <bundle.json> <target-workdir>` — fork a bundle into a
+    /// fresh session anchored at `target-workdir`.
+    Import {
+        bundle_path: String,
+        target_workdir: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +83,9 @@ pub enum ParseError {
 
     #[error("/mode: '{0}' is not a valid mode — use interactive, auto-allow, or autonomous")]
     ModeInvalid(String),
+
+    #[error("/import requires: /import <bundle.json> <target-workdir>")]
+    ImportMissingArgs,
 }
 
 /// Attempt to parse `text` as a slash-command.
@@ -133,6 +147,27 @@ pub fn parse(text: &str) -> Result<Option<SlashCommand>, ParseError> {
         "skills" | "skill" => SlashCommand::Capabilities(CapabilitiesTab::Skills),
         "mcp" => SlashCommand::Capabilities(CapabilitiesTab::Mcp),
         "hooks" | "hook" => SlashCommand::Capabilities(CapabilitiesTab::Hooks),
+        "export" | "share" => {
+            let path = if rest_of_line.is_empty() {
+                None
+            } else {
+                Some(rest_of_line.join(" "))
+            };
+            SlashCommand::Export { path }
+        }
+        "import" | "fork" => {
+            if rest_of_line.len() < 2 {
+                return Err(ParseError::ImportMissingArgs);
+            }
+            // Bundle path is the first token; everything after is the
+            // workdir (so it can contain spaces).
+            let bundle_path = rest_of_line[0].to_string();
+            let target_workdir = rest_of_line[1..].join(" ");
+            SlashCommand::Import {
+                bundle_path,
+                target_workdir,
+            }
+        }
         "mode" => {
             let arg = rest_of_line.first().copied().ok_or(ParseError::ModeMissingArg)?;
             let mode = match arg {
@@ -166,6 +201,8 @@ pub const CATALOG: &[(&str, &str)] = &[
     ("/skills", "list slash-skill commands"),
     ("/mcp", "list MCP servers wired in"),
     ("/hooks", "list PreToolUse / PostToolUse hooks"),
+    ("/export [path]", "export session as a portable bundle"),
+    ("/import <bundle> <workdir>", "fork a bundle into a new session"),
 ];
 
 /// Entries whose command name (before the first space) is a prefix match

@@ -357,6 +357,64 @@ impl App {
             | DaemonMessage::ResponseOk { .. } => {
                 // Solicited; handled by the request registry.
             }
+            DaemonMessage::SessionExportResult {
+                manifest, payload, ..
+            } => {
+                let summary = match &payload {
+                    codeoid_protocol::SessionExportPayload::File { path, size_bytes } => {
+                        format!(
+                            "exported · alias={} · {} msgs/{} ep/{} turns · {} ({} KB)",
+                            manifest.workdir.alias,
+                            manifest.counts.messages,
+                            manifest.counts.episodes,
+                            manifest.counts.turns,
+                            path,
+                            size_bytes / 1024
+                        )
+                    }
+                    codeoid_protocol::SessionExportPayload::Inline { size_bytes, .. } => {
+                        format!(
+                            "exported · alias={} · {} msgs/{} ep/{} turns · inline ({} KB)",
+                            manifest.workdir.alias,
+                            manifest.counts.messages,
+                            manifest.counts.episodes,
+                            manifest.counts.turns,
+                            size_bytes / 1024
+                        )
+                    }
+                };
+                state.record_error(summary); // surfaced in the footer
+            }
+            DaemonMessage::SessionImportResult {
+                new_session_id,
+                imported_messages,
+                imported_episodes,
+                imported_turns,
+                pinned_files_written,
+                warnings,
+                ..
+            } => {
+                let summary = format!(
+                    "imported session {} · {} msgs · {} ep · {} turns · {} pinned · {} warnings",
+                    &new_session_id[..8.min(new_session_id.len())],
+                    imported_messages,
+                    imported_episodes,
+                    imported_turns,
+                    pinned_files_written,
+                    warnings.len()
+                );
+                state.record_error(summary);
+                // Refresh session list so the new entry appears.
+                if let Some(handle) = self.handle.clone() {
+                    tokio::spawn(async move {
+                        let _ = handle
+                            .send(ClientMessage::SessionList {
+                                id: ClientHandle::next_request_id(),
+                            })
+                            .await;
+                    });
+                }
+            }
             DaemonMessage::ClaudeConfigResult {
                 request_id,
                 workdir,
@@ -550,6 +608,63 @@ impl App {
             }
             SlashCommand::Capabilities(tab) => {
                 self.open_capabilities(tab).await;
+            }
+            SlashCommand::Export { path } => {
+                self.export_focused(path).await;
+            }
+            SlashCommand::Import {
+                bundle_path,
+                target_workdir,
+            } => {
+                self.import_bundle(bundle_path, target_workdir).await;
+            }
+        }
+    }
+
+    async fn export_focused(&mut self, _path: Option<String>) {
+        let session_id = self
+            .state
+            .as_ref()
+            .and_then(|s| s.sessions.focused_id().map(ToString::to_string));
+        let Some(session_id) = session_id else {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error("no session focused — nothing to export");
+            }
+            return;
+        };
+        let Some(handle) = self.handle.clone() else { return };
+        let id = ClientHandle::next_request_id();
+        let msg = ClientMessage::SessionExport {
+            id,
+            session_id,
+            include_memory: Some(true),
+            include_pinned_files: Some(false),
+            alias_override: None,
+            // Always force on-disk for the TUI — operators want a path
+            // they can `scp` to a teammate; inline base64 in the
+            // terminal is awkward.
+            to_file: Some(true),
+        };
+        if let Err(e) = handle.send(msg).await {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error(format!("export failed: {e}"));
+            }
+        }
+    }
+
+    async fn import_bundle(&mut self, bundle_path: String, target_workdir: String) {
+        let Some(handle) = self.handle.clone() else { return };
+        let id = ClientHandle::next_request_id();
+        let msg = ClientMessage::SessionImport {
+            id,
+            source: codeoid_protocol::SessionImportSource::File { path: bundle_path },
+            target_workdir,
+            name_override: None,
+            write_pinned_files: Some(false),
+        };
+        if let Err(e) = handle.send(msg).await {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error(format!("import failed: {e}"));
             }
         }
     }
