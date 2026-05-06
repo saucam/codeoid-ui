@@ -276,6 +276,14 @@ impl App {
             Action::PageDown => state.scroll_down(page_step(state)),
             Action::ScrollToTop => state.scroll_to_top(),
             Action::ScrollToBottom => state.scroll_to_bottom(),
+            Action::ToggleVerboseToolOutput => {
+                state.verbose_tool_output = !state.verbose_tool_output;
+                // Tool blocks are cached per-message at the render layer;
+                // flipping verbose changes their height, so blow the
+                // caches so the next frame rebuilds at the new size.
+                state.render_cache.clear();
+                state.scrollback_build.clear();
+            }
         }
     }
 

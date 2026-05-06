@@ -82,6 +82,14 @@ pub struct AppState {
     /// keystroke into the prompt and every idle frame. See
     /// [`ScrollbackBuild`] for the keying rules.
     pub scrollback_build: ScrollbackBuild,
+    /// When true, tool output bodies render at their full length; when
+    /// false (default), they render in collapsed form (a few lines + a
+    /// "+N more" tail) so the user can scan agent + user turns without
+    /// drowning in `cargo build` or `find` dumps. Toggled with `v` in
+    /// transcript focus. Mirrors the web UI's expand-on-click behaviour;
+    /// global rather than per-block here because the TUI doesn't have
+    /// block-level cursor selection yet.
+    pub verbose_tool_output: bool,
 }
 
 impl std::fmt::Debug for AppState {
@@ -135,6 +143,7 @@ impl AppState {
             connection: ConnectionState::Connected,
             render_cache: RenderCache::default(),
             scrollback_build: ScrollbackBuild::default(),
+            verbose_tool_output: false,
         }
     }
 

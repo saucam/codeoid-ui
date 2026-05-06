@@ -24,15 +24,31 @@ use super::ansi::parse_ansi;
 use super::markdown::inline_spans;
 use super::spinner::{seed_from, SpinnerFrame};
 
-/// Max body lines we show per tool call. Large `git log`s or `cargo
-/// build` dumps still render their head; the remainder collapses to a
-/// "+N more" tail so the transcript doesn't get drowned.
-const MAX_BODY_LINES: usize = 40;
+/// Max body lines we show per tool call when `verbose` is on. Large
+/// `git log`s or `cargo build` dumps still render their head; the
+/// remainder collapses to a "+N more" tail so the transcript doesn't
+/// get drowned even in verbose mode.
+const MAX_BODY_LINES_VERBOSE: usize = 40;
+/// Default ("collapsed") body line cap. Mirrors the web UI so user/
+/// assistant turns stay readable when the agent does long-running tool
+/// calls. Press `v` in transcript focus to flip to verbose.
+const MAX_BODY_LINES_COLLAPSED: usize = 8;
 
 /// Render a tool invocation. `indent` is the margin applied to the
 /// header; body content sits at `indent + "  "` so it reads as a
-/// continuation.
-pub fn render_tool_block(tool: &ToolInfo, anim_tick: u64, indent: &str) -> Vec<Line<'static>> {
+/// continuation. When `verbose` is true, more of the tool body is
+/// included before truncation kicks in.
+pub fn render_tool_block(
+    tool: &ToolInfo,
+    anim_tick: u64,
+    indent: &str,
+    verbose: bool,
+) -> Vec<Line<'static>> {
+    let max_body = if verbose {
+        MAX_BODY_LINES_VERBOSE
+    } else {
+        MAX_BODY_LINES_COLLAPSED
+    };
     let spinner = SpinnerFrame::for_tick(anim_tick).glyph();
     let body_indent = format!("{indent}  ");
 
@@ -151,18 +167,26 @@ pub fn render_tool_block(tool: &ToolInfo, anim_tick: u64, indent: &str) -> Vec<L
     // to each line's existing spans so wrap still happens past the margin.
     let body = body_lines(tool);
     let total_body = body.len();
-    let shown: Vec<Line<'static>> = body.into_iter().take(MAX_BODY_LINES).collect();
+    let shown: Vec<Line<'static>> = body.into_iter().take(max_body).collect();
     for line in shown {
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 1);
         spans.push(Span::raw(body_indent.clone()));
         spans.extend(line.spans);
         out.push(Line::from(spans));
     }
-    if total_body > MAX_BODY_LINES {
+    if total_body > max_body {
+        let tail = if verbose {
+            format!("… {} more line(s) truncated", total_body - max_body)
+        } else {
+            format!(
+                "… {} more line(s) hidden — press v to expand tool output",
+                total_body - max_body,
+            )
+        };
         out.push(Line::from(vec![
             Span::raw(body_indent.clone()),
             Span::styled(
-                format!("… {} more line(s) truncated", total_body - MAX_BODY_LINES),
+                tail,
                 Style::default()
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::ITALIC),

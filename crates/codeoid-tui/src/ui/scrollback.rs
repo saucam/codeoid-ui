@@ -53,6 +53,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     };
 
     let anim_tick = state.anim_tick;
+    let verbose_tools = state.verbose_tool_output;
     let inner_width = area.width.saturating_sub(2).max(1); // minus L+R border
     let viewport_rows_u16 = area.height.saturating_sub(2);
     let viewport_rows: usize = viewport_rows_u16.into(); // minus T+B border
@@ -109,7 +110,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 version,
                 inner_width,
                 skip_cache,
-                || render_message(m, anim_tick),
+                || render_message(m, anim_tick, verbose_tools),
             );
             if rendered.is_empty() {
                 // Placeholder messages (empty assistant/thinking
@@ -229,7 +230,7 @@ fn session_title(session: &SessionInfo) -> Line<'static> {
 /// duplicate spinner. The tool card's per-tool phase indicator IS kept,
 /// since it conveys per-tool lifecycle (which tool is still running),
 /// not session-level busyness.
-fn render_message(m: &SessionMessage, anim_tick: u64) -> Vec<Line<'static>> {
+fn render_message(m: &SessionMessage, anim_tick: u64, verbose_tools: bool) -> Vec<Line<'static>> {
     // Skip placeholder messages that will be filled in by streaming
     // deltas. The header reappears once content or parts arrive.
     let has_payload = !m.content.is_empty()
@@ -245,7 +246,7 @@ fn render_message(m: &SessionMessage, anim_tick: u64) -> Vec<Line<'static>> {
     match m.role {
         MessageRole::ToolCall => {
             if let Some(tool) = &m.tool {
-                out.extend(render_tool_block(tool, anim_tick, BODY_INDENT));
+                out.extend(render_tool_block(tool, anim_tick, BODY_INDENT, verbose_tools));
             }
             if !m.content.is_empty() {
                 out.extend(render_markdown_block(&m.content, BODY_INDENT));
@@ -255,13 +256,39 @@ fn render_message(m: &SessionMessage, anim_tick: u64) -> Vec<Line<'static>> {
             // Preserve ANSI styling from the tool's raw output so git /
             // cargo / npm colors survive. A magenta left-rail marks each
             // row as tool output without masking the command's own colors.
+            // In collapsed (default) mode we cap at 8 lines + a hint row;
+            // press `v` to expand. Mirrors the limit used in
+            // `render_tool_block` for the inline tool-call output body.
             let rail_style = Style::default().fg(Color::Magenta);
-            for line in parse_ansi(&m.content) {
+            let lines = parse_ansi(&m.content);
+            let cap = if verbose_tools { 40 } else { 8 };
+            let total = lines.len();
+            for line in lines.into_iter().take(cap) {
                 let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
                 spans.push(Span::raw(BODY_INDENT.to_string()));
                 spans.push(Span::styled("▌ ", rail_style));
                 spans.extend(line.spans);
                 out.push(Line::from(spans));
+            }
+            if total > cap {
+                let hint = if verbose_tools {
+                    format!("… {} more line(s) truncated", total - cap)
+                } else {
+                    format!(
+                        "… {} more line(s) hidden — press v to expand tool output",
+                        total - cap,
+                    )
+                };
+                out.push(Line::from(vec![
+                    Span::raw(BODY_INDENT.to_string()),
+                    Span::styled("▌ ", rail_style),
+                    Span::styled(
+                        hint,
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
             }
         }
         MessageRole::Thinking => {

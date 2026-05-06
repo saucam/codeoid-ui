@@ -27,6 +27,10 @@ pub enum Action {
     ScrollDown,
     ScrollToTop,
     ScrollToBottom,
+    /// Toggle "verbose" mode for tool output bodies — collapsed (default,
+    /// 8-line preview + "+N more" tail) vs full. Bound to `v` in
+    /// transcript focus.
+    ToggleVerboseToolOutput,
 }
 
 pub fn resolve(
@@ -108,6 +112,7 @@ pub fn resolve(
         (End, _) | (Char('G'), KeyModifiers::SHIFT) => Some(Action::ScrollToBottom),
         (Up, _) | (Char('k'), KeyModifiers::NONE) => Some(Action::ScrollUp),
         (Down, _) | (Char('j'), KeyModifiers::NONE) => Some(Action::ScrollDown),
+        (Char('v'), KeyModifiers::NONE) => Some(Action::ToggleVerboseToolOutput),
         _ => None,
     }
 }

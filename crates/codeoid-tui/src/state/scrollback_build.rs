@@ -44,6 +44,16 @@ impl ScrollbackBuild {
                 .as_deref()
                 .is_some_and(|s| s == session_id)
     }
+
+    /// Drop the cached build. Used when a global toggle (e.g.
+    /// verbose-tool-output) changes how messages render at the same
+    /// width + epoch — the cache is technically still keyed correctly
+    /// but the stored `lines` are now stale.
+    pub fn clear(&mut self) {
+        self.session_id = None;
+        self.lines.clear();
+        self.total_rendered_rows = 0;
+    }
 }
 
 impl std::fmt::Debug for ScrollbackBuild {
