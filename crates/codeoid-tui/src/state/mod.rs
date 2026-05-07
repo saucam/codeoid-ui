@@ -377,6 +377,99 @@ pub enum Modal {
     Help,
     ConfirmDestroy { session_id: String, name: String },
     Capabilities(CapabilitiesModal),
+    AskUserQuestion(AskUserQuestionModal),
+}
+
+/// Per-question selection state for the AskUserQuestion form. For
+/// single-select questions, the inner `Vec<usize>` will hold at most
+/// one option index. For multi-select, it can hold many.
+#[derive(Debug, Clone)]
+pub struct AskUserQuestionState {
+    pub question: String,
+    pub header: Option<String>,
+    pub multi_select: bool,
+    pub options: Vec<AskOption>,
+    pub selected: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AskOption {
+    pub label: String,
+    pub description: Option<String>,
+}
+
+/// Modal opened automatically when the focused session's latest tool_call
+/// is `AskUserQuestion` and the user presses Approve. The modal collects
+/// answers across all questions, then sends a `session.approve` with an
+/// `updated_input` patch carrying the answers map. Cancelling sends the
+/// usual deny.
+#[derive(Debug, Clone)]
+pub struct AskUserQuestionModal {
+    pub session_id: String,
+    pub approval_id: String,
+    pub questions: Vec<AskUserQuestionState>,
+    /// Index into `questions` — which question the keyboard is acting on.
+    pub focused_question: usize,
+}
+
+impl AskUserQuestionModal {
+    /// All questions have at least one selected option. Submit is only
+    /// enabled in this state.
+    #[must_use]
+    pub fn all_answered(&self) -> bool {
+        self.questions.iter().all(|q| !q.selected.is_empty())
+    }
+
+    /// Build the daemon-bound `answers` map: `{question -> "label, …"}`.
+    /// Multi-select picks are joined with ", " — matches the SDK's
+    /// expected single-string-per-question shape.
+    #[must_use]
+    pub fn build_answers(&self) -> std::collections::HashMap<String, String> {
+        let mut out = std::collections::HashMap::new();
+        for q in &self.questions {
+            let labels: Vec<String> = q
+                .selected
+                .iter()
+                .filter_map(|&i| q.options.get(i).map(|o| o.label.clone()))
+                .collect();
+            out.insert(q.question.clone(), labels.join(", "));
+        }
+        out
+    }
+
+    /// Toggle option N for the focused question. For single-select,
+    /// flips the selection to that option (replacing prior). For
+    /// multi-select, adds/removes from the set.
+    pub fn toggle_option(&mut self, idx: usize) {
+        let Some(q) = self.questions.get_mut(self.focused_question) else { return };
+        if idx >= q.options.len() {
+            return;
+        }
+        if q.multi_select {
+            if let Some(pos) = q.selected.iter().position(|&i| i == idx) {
+                q.selected.remove(pos);
+            } else {
+                q.selected.push(idx);
+            }
+        } else {
+            q.selected = vec![idx];
+        }
+    }
+
+    pub fn next_question(&mut self) {
+        if self.questions.is_empty() {
+            return;
+        }
+        self.focused_question = (self.focused_question + 1) % self.questions.len();
+    }
+
+    pub fn prev_question(&mut self) {
+        if self.questions.is_empty() {
+            return;
+        }
+        self.focused_question =
+            (self.focused_question + self.questions.len() - 1) % self.questions.len();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

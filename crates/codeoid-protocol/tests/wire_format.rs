@@ -213,6 +213,7 @@ fn client_messages_are_camel_case_on_wire() {
                 session_id: "s".into(),
                 approval_id: "a".into(),
                 approved: true,
+                updated_input: None,
             },
         ),
         (

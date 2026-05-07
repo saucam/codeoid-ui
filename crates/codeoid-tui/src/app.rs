@@ -197,9 +197,14 @@ impl App {
         match event {
             AppEvent::Terminal(CtEvent::Key(key)) if key.kind == KeyEventKind::Press => {
                 let prompt_focused = state.focus == Focus::Prompt;
-                let modal_open = state.modal.is_some();
+                let modal_kind = match state.modal.as_ref() {
+                    Some(crate::state::Modal::AskUserQuestion(_)) => crate::keymap::ModalKind::AskUserQuestion,
+                    Some(_) => crate::keymap::ModalKind::Generic,
+                    None => crate::keymap::ModalKind::None,
+                };
+                let modal_open = !matches!(modal_kind, crate::keymap::ModalKind::None);
                 let command_mode = state.is_command_mode();
-                if let Some(action) = resolve(key, prompt_focused, modal_open, command_mode) {
+                if let Some(action) = resolve(key, prompt_focused, modal_kind, command_mode) {
                     self.apply_action(action).await;
                 } else if prompt_focused && !modal_open {
                     // Anything keymap didn't handle goes straight to the
@@ -287,7 +292,89 @@ impl App {
             Action::SelectNextToolBlock => state.cycle_tool_block_selection(true),
             Action::SelectPrevToolBlock => state.cycle_tool_block_selection(false),
             Action::ToggleExpandSelectedToolBlock => state.toggle_expand_selected_tool_block(),
+            Action::AskToggleOption(n) => {
+                if let Some(Modal::AskUserQuestion(m)) = state.modal.as_mut() {
+                    if n >= 1 {
+                        m.toggle_option((n - 1) as usize);
+                    }
+                }
+            }
+            Action::AskNextQuestion => {
+                if let Some(Modal::AskUserQuestion(m)) = state.modal.as_mut() {
+                    m.next_question();
+                }
+            }
+            Action::AskPrevQuestion => {
+                if let Some(Modal::AskUserQuestion(m)) = state.modal.as_mut() {
+                    m.prev_question();
+                }
+            }
+            Action::AskSubmit => self.submit_ask_user_question().await,
+            Action::AskCancel => self.cancel_ask_user_question().await,
         }
+    }
+
+    async fn submit_ask_user_question(&mut self) {
+        let payload = {
+            let Some(state) = self.state.as_mut() else { return };
+            let Some(Modal::AskUserQuestion(m)) = state.modal.as_ref() else { return };
+            if !m.all_answered() {
+                return;
+            }
+            let answers = m.build_answers();
+            let answers_value = serde_json::to_value(answers).ok();
+            let Some(answers_value) = answers_value else { return };
+            let mut updated = serde_json::Map::new();
+            updated.insert("answers".to_string(), answers_value);
+            (
+                m.session_id.clone(),
+                m.approval_id.clone(),
+                serde_json::Value::Object(updated),
+            )
+        };
+        if let Some(state) = self.state.as_mut() {
+            state.modal = None;
+        }
+        let (session_id, approval_id, updated_input) = payload;
+        let Some(handle) = self.handle.clone() else { return };
+        let id = ClientHandle::next_request_id();
+        if let Err(e) = handle
+            .send(ClientMessage::SessionApprove {
+                id,
+                session_id,
+                approval_id,
+                approved: true,
+                updated_input: Some(updated_input),
+            })
+            .await
+        {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error(format!("ask submit failed: {e}"));
+            }
+        }
+    }
+
+    async fn cancel_ask_user_question(&mut self) {
+        let payload = {
+            let Some(state) = self.state.as_mut() else { return };
+            let Some(Modal::AskUserQuestion(m)) = state.modal.as_ref() else { return };
+            (m.session_id.clone(), m.approval_id.clone())
+        };
+        if let Some(state) = self.state.as_mut() {
+            state.modal = None;
+        }
+        let (session_id, approval_id) = payload;
+        let Some(handle) = self.handle.clone() else { return };
+        let id = ClientHandle::next_request_id();
+        let _ = handle
+            .send(ClientMessage::SessionApprove {
+                id,
+                session_id,
+                approval_id,
+                approved: false,
+                updated_input: None,
+            })
+            .await;
     }
 
     fn apply_daemon(&mut self, msg: DaemonMessage) {
@@ -897,6 +984,23 @@ impl App {
             };
             (sid, approval_id)
         };
+        // AskUserQuestion needs an answer payload, not a binary y/n.
+        // Approve (`y`) on it pops the question form modal instead of
+        // sending a bare allow that would arrive as `answers: {}`.
+        // Deny (`d`) goes through the normal path — Claude sees a denial
+        // just like it would for any other tool.
+        if approved {
+            if let Some(state) = self.state.as_mut() {
+                if let Some(modal) = build_ask_user_question_modal(
+                    state,
+                    &session_id,
+                    &approval_id,
+                ) {
+                    state.modal = Some(Modal::AskUserQuestion(modal));
+                    return;
+                }
+            }
+        }
         let Some(handle) = self.handle.clone() else { return };
         let id = ClientHandle::next_request_id();
         if let Err(e) = handle
@@ -905,6 +1009,7 @@ impl App {
                 session_id,
                 approval_id,
                 approved,
+                updated_input: None,
             })
             .await
         {
@@ -988,6 +1093,76 @@ fn needs_animation_frame(state: &AppState) -> bool {
     }
 
     false
+}
+
+/// If the focused session's pending approval is for `AskUserQuestion`,
+/// extract the question list out of its tool input so we can show a
+/// form modal. Returns `None` for any other tool — the caller falls
+/// through to the binary approve path.
+fn build_ask_user_question_modal(
+    state: &AppState,
+    session_id: &str,
+    approval_id: &str,
+) -> Option<crate::state::AskUserQuestionModal> {
+    use crate::state::{AskOption, AskUserQuestionModal, AskUserQuestionState};
+
+    let msg = state.messages.messages(session_id).iter().rev().find(|m| {
+        m.tool
+            .as_ref()
+            .is_some_and(|t| match &t.state {
+                codeoid_protocol::ToolState::WaitingConfirmation { approval_id: aid, .. } => {
+                    aid == approval_id
+                }
+                _ => false,
+            })
+    })?;
+    let tool = msg.tool.as_ref()?;
+    let name = tool.name.as_str();
+    if name != "AskUserQuestion" && name != "ask_user_question" {
+        return None;
+    }
+    let input = match &tool.state {
+        codeoid_protocol::ToolState::WaitingConfirmation { input, .. } => input,
+        _ => return None,
+    };
+    let questions_val = input.get("questions")?.as_array()?;
+    let mut questions = Vec::with_capacity(questions_val.len());
+    for q in questions_val {
+        let question_text = q.get("question")?.as_str()?.to_string();
+        let header = q.get("header").and_then(|h| h.as_str()).map(str::to_string);
+        let multi_select = q.get("multiSelect").and_then(|b| b.as_bool()).unwrap_or(false);
+        let options_val = q.get("options")?.as_array()?;
+        let options: Vec<AskOption> = options_val
+            .iter()
+            .filter_map(|o| {
+                let label = o.get("label")?.as_str()?.to_string();
+                let description = o
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .map(str::to_string);
+                Some(AskOption { label, description })
+            })
+            .collect();
+        if options.is_empty() {
+            continue;
+        }
+        questions.push(AskUserQuestionState {
+            question: question_text,
+            header,
+            multi_select,
+            options,
+            selected: Vec::new(),
+        });
+    }
+    if questions.is_empty() {
+        return None;
+    }
+    Some(AskUserQuestionModal {
+        session_id: session_id.to_string(),
+        approval_id: approval_id.to_string(),
+        questions,
+        focused_question: 0,
+    })
 }
 
 fn find_latest_approval(state: &AppState, session_id: &str) -> Option<String> {

@@ -57,6 +57,12 @@ pub enum ClientMessage {
         session_id: String,
         approval_id: String,
         approved: bool,
+        /// Optional patch shallow-merged into the original tool input
+        /// before the SDK runs the tool. Required for AskUserQuestion
+        /// where it carries `{ "answers": { "<question>": "..." } }`.
+        /// Omitted for binary approvals (Bash, Edit, ExitPlanMode, …).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        updated_input: Option<serde_json::Value>,
     },
 
     #[serde(rename = "session.destroy", rename_all = "camelCase")]

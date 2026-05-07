@@ -6,16 +6,19 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::state::{AppState, CapabilitiesModal, CapabilitiesTab, Modal};
+use crate::state::{
+    AppState, AskUserQuestionModal, CapabilitiesModal, CapabilitiesTab, Modal,
+};
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     // Signature matches the scope needed here; the rest of the tree can
     // borrow mutably without hitting this widget.
     let Some(modal) = &state.modal else { return };
 
-    // Capabilities deserves more screen real estate for the entries.
+    // Capabilities and AskUserQuestion deserve more screen real estate
+    // for entries / question lists.
     let area = match modal {
-        Modal::Capabilities(_) => centered(frame.area(), 80, 75),
+        Modal::Capabilities(_) | Modal::AskUserQuestion(_) => centered(frame.area(), 80, 75),
         _ => centered(frame.area(), 60, 50),
     };
 
@@ -25,6 +28,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         Modal::Help => render_help(frame, area),
         Modal::ConfirmDestroy { name, .. } => render_confirm_destroy(frame, area, name),
         Modal::Capabilities(c) => render_capabilities(frame, area, c),
+        Modal::AskUserQuestion(m) => render_ask_user_question(frame, area, m),
     }
 }
 
@@ -62,6 +66,13 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         bind("d", "deny pending tool"),
         bind("Ctrl+X / .", "interrupt session"),
         bind("m", "cycle execution mode"),
+        Line::raw(""),
+        heading("Ask-user-question"),
+        bind("y (when asked)", "open question form modal"),
+        bind("1-9", "toggle option for current question"),
+        bind("Tab / j k", "next / prev question"),
+        bind("Enter", "submit answers"),
+        bind("Esc", "cancel (sends deny back to Claude)"),
         Line::raw(""),
         heading("Tool output"),
         bind("v", "toggle full tool output (global)"),
@@ -376,4 +387,113 @@ fn bind(keys: &'static str, description: &'static str) -> Line<'static> {
         ),
         Span::raw(description),
     ])
+}
+
+fn render_ask_user_question(frame: &mut Frame<'_>, area: Rect, m: &AskUserQuestionModal) {
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    rows.push(Line::from(vec![
+        Span::styled(
+            "Claude is asking ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("({} question{})", m.questions.len(), if m.questions.len() == 1 { "" } else { "s" }),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    rows.push(Line::raw(""));
+
+    for (qi, q) in m.questions.iter().enumerate() {
+        let is_focused_q = qi == m.focused_question;
+        let prefix = if is_focused_q { "▶ " } else { "  " };
+        let q_style = if is_focused_q {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        };
+        let multi_hint = if q.multi_select {
+            " (pick one or more)"
+        } else {
+            ""
+        };
+        let mut header_spans: Vec<Span<'static>> = vec![Span::styled(prefix.to_string(), q_style)];
+        if let Some(hdr) = &q.header {
+            header_spans.push(Span::styled(
+                format!("[{}] ", hdr),
+                Style::default().fg(Color::Magenta),
+            ));
+        }
+        header_spans.push(Span::styled(format!("Q{}: {}", qi + 1, q.question), q_style));
+        header_spans.push(Span::styled(
+            multi_hint.to_string(),
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        ));
+        rows.push(Line::from(header_spans));
+
+        for (oi, opt) in q.options.iter().enumerate() {
+            let selected = q.selected.contains(&oi);
+            let marker = if q.multi_select {
+                if selected { "[x]" } else { "[ ]" }
+            } else if selected {
+                "(*)"
+            } else {
+                "( )"
+            };
+            let style = if selected {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let label_spans = vec![
+                Span::raw("    "),
+                Span::styled(format!("{}. ", oi + 1), Style::default().fg(Color::Yellow)),
+                Span::styled(marker.to_string(), style),
+                Span::raw(" "),
+                Span::styled(opt.label.clone(), style),
+            ];
+            rows.push(Line::from(label_spans));
+            if let Some(desc) = &opt.description {
+                rows.push(Line::from(vec![
+                    Span::raw("        "),
+                    Span::styled(
+                        desc.clone(),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
+            }
+        }
+        rows.push(Line::raw(""));
+    }
+
+    rows.push(Line::raw(""));
+    let submit_style = if m.all_answered() {
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    rows.push(Line::from(vec![
+        Span::styled("[1-9]", Style::default().fg(Color::Yellow)),
+        Span::raw(" toggle option · "),
+        Span::styled("[Tab/j/k]", Style::default().fg(Color::Yellow)),
+        Span::raw(" next/prev question · "),
+        Span::styled("[Enter]", submit_style),
+        Span::raw(" submit · "),
+        Span::styled("[Esc]", Style::default().fg(Color::Red)),
+        Span::raw(" cancel"),
+    ]));
+
+    let title = if m.all_answered() {
+        " AskUserQuestion · ready to submit "
+    } else {
+        " AskUserQuestion · pick an option for every question "
+    };
+    let p = Paragraph::new(rows).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .title_alignment(Alignment::Left),
+    );
+    frame.render_widget(p, area);
 }
