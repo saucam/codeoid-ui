@@ -19,7 +19,7 @@ use std::io;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use codeoid_client::resolve_token;
+use codeoid_client::{load_file_config, resolve_token, resolve_zeroid_url};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
 };
@@ -36,22 +36,26 @@ use crate::app::App;
 #[derive(Debug, Parser)]
 #[command(name = "codeoid-tui", version, about = "Terminal cockpit for Codeoid")]
 struct Cli {
-    /// Daemon WebSocket URL.
-    #[arg(long, env = "CODEOID_URL", default_value = "ws://127.0.0.1:7400")]
-    url: String,
+    /// Daemon WebSocket URL. Falls back to `daemonUrl` in
+    /// `~/.codeoid/config.json`, then `ws://127.0.0.1:7400`.
+    #[arg(long, env = "CODEOID_URL")]
+    url: Option<String>,
 
     /// A ready-to-use ZeroID access token (JWT). Takes precedence over `--api-key`.
     #[arg(long, env = "CODEOID_TOKEN")]
     token: Option<String>,
 
     /// ZeroID API key (prefix `zid_sk_`). If set, the client will exchange it
-    /// for an access token at `--zeroid-url` before connecting.
+    /// for an access token at the resolved issuer before connecting. Falls
+    /// back to `apiKey` in `~/.codeoid/config.json` (written by `codeoid login`).
     #[arg(long, env = "CODEOID_API_KEY")]
     api_key: Option<String>,
 
-    /// ZeroID base URL, used when exchanging an API key for a token.
-    #[arg(long, env = "ZEROID_URL", default_value = "http://localhost:8899")]
-    zeroid_url: String,
+    /// ZeroID issuer used when exchanging an API key — a preset name
+    /// (`highflame`, `highflame-dev`, `local`) or a URL. Falls back to
+    /// `zeroidUrl` in `~/.codeoid/config.json`, then `highflame` (SaaS).
+    #[arg(long, env = "ZEROID_URL")]
+    zeroid_url: Option<String>,
 
     /// Path to write a file log (tracing). Stderr is reserved for the TUI.
     #[arg(long, env = "CODEOID_LOG_FILE")]
@@ -70,13 +74,28 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.log_file.as_deref())?;
 
-    let token = resolve_token(cli.token.as_deref(), cli.api_key.as_deref(), &cli.zeroid_url)
+    // Layer credentials/endpoints: CLI flag (or env, via clap) → config.json
+    // → built-in default. This is what lets the TUI share one `codeoid login`
+    // with the CLI and web frontends.
+    let file = load_file_config();
+    let daemon_url = cli
+        .url
+        .or(file.daemon_url)
+        .unwrap_or_else(|| "ws://127.0.0.1:7400".to_string());
+    let zeroid_input = cli
+        .zeroid_url
+        .or(file.zeroid_url)
+        .unwrap_or_else(|| "highflame".to_string());
+    let zeroid_url = resolve_zeroid_url(&zeroid_input);
+    let api_key = cli.api_key.or(file.api_key);
+
+    let token = resolve_token(cli.token.as_deref(), api_key.as_deref(), &zeroid_url)
         .await
         .context("failed to resolve auth token")?;
 
     let mouse = !cli.no_mouse;
     let mut terminal = setup_terminal(mouse)?;
-    let res = App::new(cli.url, token).run(&mut terminal).await;
+    let res = App::new(daemon_url, token).run(&mut terminal).await;
     restore_terminal(&mut terminal, mouse)?;
     res
 }

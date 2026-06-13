@@ -34,6 +34,12 @@ pub enum SlashCommand {
     Deny,
     /// `/mode <interactive|auto-allow|autonomous>` — switch execution mode.
     SetMode(SessionMode),
+    /// `/model [value]` — with an argument, switch the focused session's
+    /// model; with none, list the available models. The value is validated
+    /// against the fetched catalog by the reducer.
+    Model(Option<String>),
+    /// `/who` — show the authenticated ZeroID identity + scopes.
+    Who,
     /// `/rotate` — rotate the backing Claude Code context.
     Rotate,
     /// `/help` — open the help modal.
@@ -141,6 +147,13 @@ pub fn parse(text: &str) -> Result<Option<SlashCommand>, ParseError> {
         "approve" | "yes" | "y" => SlashCommand::Approve,
         "deny" | "reject" | "no" | "n" => SlashCommand::Deny,
         "rotate" => SlashCommand::Rotate,
+        "model" | "m" => {
+            // `/model` lists; `/model <value>` switches. The value is a
+            // single token (model ids have no spaces).
+            let value = rest_of_line.first().map(|s| (*s).to_string());
+            SlashCommand::Model(value)
+        }
+        "who" | "whoami" => SlashCommand::Who,
         "help" | "h" | "?" => SlashCommand::Help,
         "clear" | "cls" => SlashCommand::Clear,
         "agents" | "agent" => SlashCommand::Capabilities(CapabilitiesTab::Agents),
@@ -194,6 +207,8 @@ pub const CATALOG: &[(&str, &str)] = &[
     ("/approve", "approve the pending tool"),
     ("/deny", "deny the pending tool"),
     ("/mode <mode>", "interactive | auto | autonomous"),
+    ("/model [value]", "list models, or switch the focused session"),
+    ("/who", "show your ZeroID identity + scopes"),
     ("/rotate", "rotate the backing context"),
     ("/help", "show the help modal"),
     ("/clear", "clear the prompt"),
@@ -399,6 +414,26 @@ mod tests {
     fn rename_requires_name() {
         assert_eq!(parse("/rename"), Err(ParseError::RenameMissingName));
         assert_eq!(parse("/rename    "), Err(ParseError::RenameMissingName));
+    }
+
+    #[test]
+    fn model_lists_and_switches() {
+        assert_eq!(parse("/model"), Ok(Some(SlashCommand::Model(None))));
+        assert_eq!(parse("/m"), Ok(Some(SlashCommand::Model(None))));
+        assert_eq!(
+            parse("/model opus[1m]"),
+            Ok(Some(SlashCommand::Model(Some("opus[1m]".into()))))
+        );
+        assert_eq!(
+            parse("/model sonnet"),
+            Ok(Some(SlashCommand::Model(Some("sonnet".into()))))
+        );
+    }
+
+    #[test]
+    fn who_aliases() {
+        assert_eq!(parse("/who"), Ok(Some(SlashCommand::Who)));
+        assert_eq!(parse("/whoami"), Ok(Some(SlashCommand::Who)));
     }
 
     #[test]

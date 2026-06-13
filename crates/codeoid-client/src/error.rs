@@ -38,6 +38,9 @@ pub enum ClientError {
     #[error("internal channel send error")]
     ChannelClosed,
 
+    #[error("heartbeat timed out — no traffic from daemon within the liveness window")]
+    HeartbeatTimeout,
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

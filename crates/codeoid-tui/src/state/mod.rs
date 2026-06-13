@@ -15,7 +15,7 @@ pub mod sessions;
 
 use std::collections::{HashMap, HashSet};
 
-use codeoid_protocol::{AuthOkMsg, SessionInfo};
+use codeoid_protocol::{AuthOkMsg, ModelInfo, SessionInfo};
 use tui_textarea::TextArea;
 
 use self::messages::MessageStore;
@@ -27,6 +27,12 @@ use self::sessions::SessionList;
 /// so tests can exercise the reducer without Ratatui or Tokio.
 pub struct AppState {
     pub auth: AuthOkMsg,
+    /// Selectable model catalog from the backend (`models.list`). Empty
+    /// until the result lands; used to validate `/model` and to map a
+    /// model value to its human display name.
+    pub models: Vec<ModelInfo>,
+    /// True when `models` came from the live backend (vs a built-in fallback).
+    pub models_live: bool,
     pub sessions: SessionList,
     pub messages: MessageStore,
     pub focus: Focus,
@@ -137,6 +143,8 @@ impl AppState {
         prompt.set_placeholder_text("Message…  Enter sends · Shift+Enter newline · Esc blurs");
         Self {
             auth,
+            models: Vec::new(),
+            models_live: false,
             sessions: SessionList::default(),
             messages: MessageStore::default(),
             focus: Focus::Prompt,
@@ -313,6 +321,17 @@ impl AppState {
 
     pub fn record_error(&mut self, err: impl Into<String>) {
         self.last_error = Some(err.into());
+    }
+
+    /// Human label for a model value, looked up in the fetched catalog;
+    /// falls back to the raw value when the catalog is empty or unknown.
+    #[must_use]
+    pub fn model_display(&self, value: &str) -> String {
+        self.models
+            .iter()
+            .find(|m| m.value == value)
+            .map(|m| m.display_name.clone())
+            .unwrap_or_else(|| value.to_string())
     }
 
     /// Scroll up by N rendered rows. Transitions Bottom → Anchored on

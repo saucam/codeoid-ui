@@ -40,9 +40,9 @@ pub mod tool;
 pub use client::{Attachment, ClientMessage, SearchScope, SendPriority, SessionImportSource};
 pub use daemon::{
     AuthOkMsg, ClaudeConfigAgent, ClaudeConfigHook, ClaudeConfigMcpServer, ClaudeConfigScope,
-    ClaudeConfigSkill, DaemonMessage, ErrorCode, SessionExportCounts, SessionExportManifest,
-    SessionExportMetaSlim, SessionExportPayload, SessionExportWorkdir, SessionSearchHit,
-    SessionSearchSnippet,
+    ClaudeConfigSkill, DaemonMessage, ErrorCode, ModelInfo, SessionExportCounts,
+    SessionExportManifest, SessionExportMetaSlim, SessionExportPayload, SessionExportWorkdir,
+    SessionSearchHit, SessionSearchSnippet,
 };
 pub use message::{
     ContentPart, IdentityType, MessageIdentity, MessageRole, SessionMessage, SessionMessageDelta,

@@ -31,14 +31,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         return;
     }
 
-    let line = build_line(state).unwrap_or_else(|| {
-        Line::from(Span::styled(
-            "  idle",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-        ))
-    });
+    let line = build_line(state).unwrap_or_else(|| idle_line(state));
 
     // Right side: a subtle scroll position hint.
     let right = scroll_hint(state);
@@ -184,6 +177,29 @@ fn build_line(state: &AppState) -> Option<Line<'static>> {
     }
 
     None
+}
+
+/// Idle row — quiet "idle" plus the focused session's model when known,
+/// so the active model is always visible at a glance (matches the web's
+/// model indicator).
+fn idle_line(state: &AppState) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        "  idle",
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    )];
+    if let Some(model) = state.sessions.focused().and_then(|s| s.model.as_deref()) {
+        let disp = state.model_display(model);
+        spans.push(Span::styled("  ·  ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            format!("model: {disp}"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn thinking_line(session: &SessionInfo, tick: u64) -> Line<'static> {

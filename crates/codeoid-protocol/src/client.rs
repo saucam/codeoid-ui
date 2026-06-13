@@ -31,6 +31,11 @@ pub enum ClientMessage {
     #[serde(rename = "session.list", rename_all = "camelCase")]
     SessionList { id: String },
 
+    /// Request the backend's selectable model catalog. Daemon answers with
+    /// [`DaemonMessage::ModelsListResult`](crate::daemon::DaemonMessage::ModelsListResult).
+    #[serde(rename = "models.list", rename_all = "camelCase")]
+    ModelsList { id: String },
+
     #[serde(rename = "session.attach", rename_all = "camelCase")]
     SessionAttach { id: String, session_id: String },
 
@@ -177,6 +182,7 @@ impl ClientMessage {
         match self {
             Self::SessionCreate { id, .. }
             | Self::SessionList { id }
+            | Self::ModelsList { id }
             | Self::SessionAttach { id, .. }
             | Self::SessionDetach { id, .. }
             | Self::SessionSend { id, .. }

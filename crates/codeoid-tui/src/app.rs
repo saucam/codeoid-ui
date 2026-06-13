@@ -34,6 +34,10 @@ const TICK: Duration = Duration::from_millis(100);
 /// Reconnect budget. Beyond this we give up and surface a terminal error.
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
+/// Cap on messages buffered while disconnected, so a long outage can't
+/// grow the queue without bound. Matches the web client's `MAX_QUEUED`.
+const MAX_QUEUED_SENDS: usize = 200;
+
 pub struct App {
     url: String,
     token: String,
@@ -41,6 +45,10 @@ pub struct App {
     handle: Option<ClientHandle>,
     daemon_events: Option<mpsc::Receiver<StreamEvent>>,
     quit_requested: bool,
+    /// Outbound user messages typed while the socket was down. Flushed in
+    /// order on reconnect so a message composed during a blip is never
+    /// silently lost (mirrors `pendingSends` in the web client).
+    pending_sends: Vec<ClientMessage>,
 }
 
 impl App {
@@ -53,6 +61,7 @@ impl App {
             handle: None,
             daemon_events: None,
             quit_requested: false,
+            pending_sends: Vec::new(),
         }
     }
 
@@ -408,6 +417,10 @@ impl App {
                     }
                 }
             }
+            DaemonMessage::ModelsListResult { models, live, .. } => {
+                state.models = models;
+                state.models_live = live;
+            }
             DaemonMessage::SessionInfoUpdate { session, .. } => {
                 state.merge_session(session);
             }
@@ -564,6 +577,12 @@ impl App {
             if let Err(e) = handle.send(ClientMessage::SessionList { id }).await {
                 warn!(error = %e, "failed to send initial session.list");
             }
+            // Fetch the model catalog so /model can validate + display.
+            // Fire-and-forget: the result routes back through apply_daemon.
+            let mid = ClientHandle::next_request_id();
+            if let Err(e) = handle.send(ClientMessage::ModelsList { id: mid }).await {
+                warn!(error = %e, "failed to send models.list");
+            }
         }
     }
 
@@ -608,6 +627,8 @@ impl App {
                     for id in previously_attached {
                         self.attach_if_needed(id).await;
                     }
+                    // Drain anything the user typed while we were down.
+                    self.flush_pending_sends().await;
                     return Ok(());
                 }
                 Err(e) => {
@@ -658,31 +679,83 @@ impl App {
             return;
         };
 
-        // Serialize attach -> send on the same ordered mpsc. This is the
-        // ONLY place that guarantees the daemon sees our attach before the
-        // first send — without it, the daemon drops our broadcast list
-        // for this session and the user sees nothing.
-        self.attach_if_needed(session.id.clone()).await;
+        self.send_user_text(session.id, text).await;
+    }
 
-        let Some(handle) = self.handle.clone() else { return };
-        let id = ClientHandle::next_request_id();
+    /// Send a user message now, or buffer it for flush-on-reconnect if the
+    /// socket is down. Attach-before-send ordering is preserved when live
+    /// (and re-applied on flush), so the daemon always has us in the
+    /// session's broadcast list before the message lands.
+    async fn send_user_text(&mut self, session_id: String, text: String) {
+        let connected = matches!(
+            self.state.as_ref().map(|s| &s.connection),
+            Some(ConnectionState::Connected)
+        );
         let msg = ClientMessage::SessionSend {
-            id,
-            session_id: session.id,
+            id: ClientHandle::next_request_id(),
+            session_id: session_id.clone(),
             text,
             attachments: None,
             priority: None,
         };
-        if let Err(e) = handle.send(msg).await {
-            if let Some(state) = self.state.as_mut() {
-                state.record_error(format!("send failed: {e}"));
+
+        if connected {
+            // Serialize attach -> send on the same ordered mpsc so the daemon
+            // sees our attach before the first send.
+            self.attach_if_needed(session_id).await;
+            if let Some(handle) = self.handle.clone() {
+                if handle.send(msg.clone()).await.is_ok() {
+                    if let Some(state) = self.state.as_mut() {
+                        state.last_error = None;
+                        state.scroll_to_bottom();
+                        state.focus = Focus::Prompt;
+                    }
+                    return;
+                }
             }
-            return;
         }
+
+        // Offline, or the send raced a drop — buffer it.
+        self.queue_send(msg);
         if let Some(state) = self.state.as_mut() {
-            state.last_error = None;
+            state.record_error("offline — message queued, will send on reconnect");
             state.scroll_to_bottom();
             state.focus = Focus::Prompt;
+        }
+    }
+
+    /// Buffer an outbound message (bounded). Silently drops past the cap —
+    /// a minutes-long outage shouldn't grow memory without limit.
+    fn queue_send(&mut self, msg: ClientMessage) {
+        if self.pending_sends.len() < MAX_QUEUED_SENDS {
+            self.pending_sends.push(msg);
+        }
+    }
+
+    /// Flush buffered sends in order after a reconnect. Re-attaches before
+    /// each session send. On a re-failure, the unsent remainder is requeued
+    /// (order preserved) for the next reconnect.
+    async fn flush_pending_sends(&mut self) {
+        if self.pending_sends.is_empty() {
+            return;
+        }
+        let batch = std::mem::take(&mut self.pending_sends);
+        let total = batch.len();
+        for (i, msg) in batch.iter().enumerate() {
+            if let ClientMessage::SessionSend { session_id, .. } = msg {
+                self.attach_if_needed(session_id.clone()).await;
+            }
+            let Some(handle) = self.handle.clone() else {
+                self.pending_sends.extend_from_slice(&batch[i..]);
+                return;
+            };
+            if handle.send(msg.clone()).await.is_err() {
+                self.pending_sends.extend_from_slice(&batch[i..]);
+                return;
+            }
+        }
+        if let Some(state) = self.state.as_mut() {
+            state.record_error(format!("reconnected — flushed {total} queued message(s)"));
         }
     }
 
@@ -696,6 +769,8 @@ impl App {
             SlashCommand::Deny => self.approve(false).await,
             SlashCommand::Rotate => self.rotate_focused().await,
             SlashCommand::SetMode(mode) => self.set_mode(mode).await,
+            SlashCommand::Model(value) => self.set_model(value).await,
+            SlashCommand::Who => self.show_who(),
             SlashCommand::Help => {
                 if let Some(state) = self.state.as_mut() {
                     state.modal = Some(Modal::Help);
@@ -913,6 +988,117 @@ impl App {
                 max_turns: None,
             })
             .await;
+    }
+
+    /// `/model` with no arg — list the catalog (and mark the current +
+    /// default) in the footer.
+    fn list_models(&mut self) {
+        let Some(state) = self.state.as_mut() else { return };
+        if state.models.is_empty() {
+            state.record_error("models: catalog not loaded yet — try again in a moment");
+            return;
+        }
+        let current = state.sessions.focused().and_then(|s| s.model.clone());
+        let list = state
+            .models
+            .iter()
+            .map(|m| {
+                let mark = if current.as_deref() == Some(m.value.as_str()) {
+                    "● " // current
+                } else if m.is_default.unwrap_or(false) {
+                    "★ " // backend default
+                } else {
+                    ""
+                };
+                format!("{mark}{}", m.value)
+            })
+            .collect::<Vec<_>>()
+            .join("  ·  ");
+        let src = if state.models_live { "live" } else { "fallback" };
+        state.record_error(format!("models ({src}): {list}   — /model <value> to switch"));
+    }
+
+    /// `/model <value>` — validate against the catalog, then switch the
+    /// focused session's model. Mirrors the web/Telegram feedback on an
+    /// invalid model.
+    async fn set_model(&mut self, value: Option<String>) {
+        let Some(value) = value else {
+            self.list_models();
+            return;
+        };
+
+        // Decide what to do under a single scoped borrow, so we don't hold
+        // an immutable borrow of `state` across a later `as_mut()`.
+        enum Plan {
+            Send(String),
+            Invalid(String),
+            NoSession,
+        }
+        let plan = {
+            let Some(state) = self.state.as_ref() else { return };
+            if !state.models.is_empty() && !state.models.iter().any(|m| m.value == value) {
+                let valid = state
+                    .models
+                    .iter()
+                    .map(|m| m.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Plan::Invalid(format!("model '{value}' not found — available: {valid}"))
+            } else if let Some(id) = state.sessions.focused_id().map(ToString::to_string) {
+                Plan::Send(id)
+            } else {
+                Plan::NoSession
+            }
+        };
+
+        let session_id = match plan {
+            Plan::Send(id) => id,
+            Plan::Invalid(msg) => {
+                if let Some(s) = self.state.as_mut() {
+                    s.record_error(msg);
+                }
+                return;
+            }
+            Plan::NoSession => {
+                if let Some(s) = self.state.as_mut() {
+                    s.record_error("no session focused — /model needs a session");
+                }
+                return;
+            }
+        };
+
+        let Some(handle) = self.handle.clone() else { return };
+        let id = ClientHandle::next_request_id();
+        if let Err(e) = handle
+            .send(ClientMessage::SessionSetModel {
+                id,
+                session_id,
+                model: value.clone(),
+                fallback_model: None,
+            })
+            .await
+        {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error(format!("set-model failed: {e}"));
+            }
+        } else if let Some(state) = self.state.as_mut() {
+            let disp = state.model_display(&value);
+            state.record_error(format!("model → {disp}"));
+        }
+    }
+
+    /// `/who` — surface the authenticated ZeroID identity + scope count.
+    fn show_who(&mut self) {
+        let Some(state) = self.state.as_mut() else { return };
+        let sub = state.auth.identity.sub.clone();
+        let name = state
+            .auth
+            .identity
+            .name
+            .clone()
+            .unwrap_or_else(|| "—".to_string());
+        let scopes = state.auth.scopes.len();
+        state.record_error(format!("you: {sub} · {name} · {scopes} scopes"));
     }
 
     async fn ensure_attached(&mut self) {

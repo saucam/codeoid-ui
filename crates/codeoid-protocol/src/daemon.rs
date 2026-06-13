@@ -50,6 +50,14 @@ pub enum DaemonMessage {
         sessions: Vec<SessionInfo>,
     },
 
+    #[serde(rename = "models.list.result", rename_all = "camelCase")]
+    ModelsListResult {
+        request_id: String,
+        models: Vec<ModelInfo>,
+        /// True when these came from the live backend; false = built-in fallback.
+        live: bool,
+    },
+
     #[serde(rename = "session.message")]
     SessionMessage(SessionMessage),
 
@@ -222,6 +230,23 @@ pub struct ClaudeConfigHook {
     pub matcher: Option<String>,
     pub kind: String,
     pub command: String,
+}
+
+/// One selectable model as reported by the Claude Code backend. Mirrors
+/// `ModelInfo` in `codeoid/src/protocol/types.ts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInfo {
+    /// Value passed to `/model` and forwarded to the SDK (e.g. `"opus[1m]"`).
+    pub value: String,
+    /// Human label (e.g. `"Opus"`).
+    pub display_name: String,
+    /// Optional one-line description from the backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// True for the backend's recommended default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_default: Option<bool>,
 }
 
 /// Sent after a successful auth handshake, before any other traffic.

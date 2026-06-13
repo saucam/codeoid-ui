@@ -1,6 +1,7 @@
 //! WebSocket connection lifecycle: connect → auth → spawn reader → hand out
 //! a [`ClientHandle`] that the TUI uses to send requests and consume events.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,6 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
+use tokio::time::{Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tracing::{debug, trace, warn};
@@ -48,6 +50,7 @@ pub struct ClientHandle {
     registry: RequestRegistry,
     _reader: Arc<JoinHandle<()>>,
     _writer: Arc<JoinHandle<()>>,
+    _heartbeat: Arc<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for ClientHandle {
@@ -161,8 +164,21 @@ pub async fn connect(url: &str, token: &str) -> Result<Connected> {
     let (ev_tx, ev_rx) = mpsc::channel::<StreamEvent>(256);
     let (out_tx, out_rx) = mpsc::channel::<Outbound>(64);
 
-    let reader_handle = spawn_reader(read, registry.clone(), ev_tx.clone());
+    // Liveness: a shared monotonic "last frame received" timestamp the reader
+    // bumps on every inbound frame and the heartbeat task reads to decide
+    // when to ping / when to declare the socket dead.
+    let base = Instant::now();
+    let last_activity = Arc::new(AtomicU64::new(0));
+
+    let reader_handle = spawn_reader(
+        read,
+        registry.clone(),
+        ev_tx.clone(),
+        last_activity.clone(),
+        base,
+    );
     let writer_handle = spawn_writer(write.clone(), out_rx);
+    let heartbeat_handle = spawn_heartbeat(write.clone(), ev_tx, last_activity, base);
 
     Ok(Connected {
         handle: ClientHandle {
@@ -170,6 +186,7 @@ pub async fn connect(url: &str, token: &str) -> Result<Connected> {
             registry,
             _reader: Arc::new(reader_handle),
             _writer: Arc::new(writer_handle),
+            _heartbeat: Arc::new(heartbeat_handle),
         },
         events: ev_rx,
         auth,
@@ -229,6 +246,8 @@ fn spawn_reader(
     mut read: ReadHalf,
     registry: RequestRegistry,
     ev_tx: mpsc::Sender<StreamEvent>,
+    last_activity: Arc<AtomicU64>,
+    base: Instant,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(frame) = read.next().await {
@@ -241,6 +260,9 @@ fn spawn_reader(
                     return;
                 }
             };
+            // Any inbound frame — text, ping, or the pong answering our
+            // heartbeat — counts as liveness; reset the idle clock.
+            last_activity.store(base.elapsed().as_millis() as u64, Ordering::Relaxed);
             match frame {
                 WsMessage::Text(t) => {
                     trace!(bytes = t.len(), "ws recv text");
@@ -273,6 +295,55 @@ fn spawn_reader(
             }
         }
         let _ = ev_tx.send(StreamEvent::Closed).await;
+    })
+}
+
+// ── Heartbeat ──────────────────────────────────────────────────────────────
+//
+// Detect a dead socket and force a reconnect. We use WS-level Ping frames
+// (the daemon's Bun.serve auto-answers with Pong) rather than the web
+// client's app-level `{type:"ping"}` — browsers can't emit WS pings, so the
+// web frontend simulates one; tungstenite can, so this is the cleaner
+// primitive and needs no protocol round-trip. Tuned to match the web
+// client's 20s-ping / 28s-dead window so all frontends behave alike.
+const HEARTBEAT_CHECK_EVERY: Duration = Duration::from_secs(4);
+const HEARTBEAT_PING_AFTER_MS: u64 = 20_000;
+const HEARTBEAT_DEAD_AFTER_MS: u64 = 28_000;
+
+fn spawn_heartbeat(
+    write: WriteHalf,
+    ev_tx: mpsc::Sender<StreamEvent>,
+    last_activity: Arc<AtomicU64>,
+    base: Instant,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(HEARTBEAT_CHECK_EVERY);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let now_ms = base.elapsed().as_millis() as u64;
+            let idle_ms = now_ms.saturating_sub(last_activity.load(Ordering::Relaxed));
+
+            if idle_ms >= HEARTBEAT_DEAD_AFTER_MS {
+                warn!(idle_ms, "heartbeat: no traffic in liveness window — connection is dead");
+                let _ = ev_tx
+                    .send(StreamEvent::Errored(ClientError::HeartbeatTimeout))
+                    .await;
+                return;
+            }
+            if idle_ms >= HEARTBEAT_PING_AFTER_MS {
+                trace!(idle_ms, "heartbeat: sending ws ping");
+                let mut w = write.lock().await;
+                if w.send(WsMessage::Ping(Vec::new())).await.is_err() {
+                    // The write half is gone (socket dead / replaced) — the
+                    // reader will/has already surfaced the drop. Stop pinging.
+                    let _ = ev_tx
+                        .send(StreamEvent::Errored(ClientError::HeartbeatTimeout))
+                        .await;
+                    return;
+                }
+            }
+        }
     })
 }
 
@@ -333,9 +404,11 @@ async fn route(
             }
         }
         DaemonMessage::SessionListResult { .. }
+        | DaemonMessage::ModelsListResult { .. }
         | DaemonMessage::SessionSearchResult { .. } => {
             let request_id = match &msg {
                 DaemonMessage::SessionListResult { request_id, .. }
+                | DaemonMessage::ModelsListResult { request_id, .. }
                 | DaemonMessage::SessionSearchResult { request_id, .. } => request_id.clone(),
                 _ => unreachable!(),
             };
@@ -373,6 +446,7 @@ fn daemon_kind(msg: &DaemonMessage) -> &'static str {
         DaemonMessage::ResponseOk { .. } => "response.ok",
         DaemonMessage::ResponseError { .. } => "response.error",
         DaemonMessage::SessionListResult { .. } => "session.list.result",
+        DaemonMessage::ModelsListResult { .. } => "models.list.result",
         DaemonMessage::SessionMessage(_) => "session.message",
         DaemonMessage::SessionMessageDelta(_) => "session.message.delta",
         DaemonMessage::SessionStatusChange { .. } => "session.status_change",
@@ -390,6 +464,7 @@ fn client_kind(msg: &ClientMessage) -> &'static str {
     match msg {
         ClientMessage::SessionCreate { .. } => "session.create",
         ClientMessage::SessionList { .. } => "session.list",
+        ClientMessage::ModelsList { .. } => "models.list",
         ClientMessage::SessionAttach { .. } => "session.attach",
         ClientMessage::SessionDetach { .. } => "session.detach",
         ClientMessage::SessionSend { .. } => "session.send",
