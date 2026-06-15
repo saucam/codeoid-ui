@@ -50,9 +50,7 @@ fn build_palette(state: &AppState) -> Line<'static> {
             Span::raw("  "),
             Span::styled(
                 "⌘ no matching command",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
             Span::styled(
@@ -80,10 +78,7 @@ fn build_palette(state: &AppState) -> Line<'static> {
     ];
     for (i, (usage, desc)) in visible.enumerate() {
         if i > 0 {
-            spans.push(Span::styled(
-                "  ·  ",
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled("  ·  ", Style::default().fg(Color::DarkGray)));
         }
         spans.push(Span::styled(
             (*usage).to_string(),
@@ -221,10 +216,7 @@ fn thinking_line(session: &SessionInfo, tick: u64) -> Line<'static> {
                 .add_modifier(Modifier::ITALIC),
         ),
         Span::raw("  "),
-        Span::styled(
-            "[Ctrl+X] interrupt",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled("[Esc] interrupt", Style::default().fg(Color::DarkGray)),
     ])
 }
 
@@ -263,10 +255,7 @@ fn tool_line(msgs: &[SessionMessage], tick: u64) -> Option<Line<'static>> {
                 .add_modifier(Modifier::ITALIC),
         ),
         Span::raw("  "),
-        Span::styled(
-            "[Ctrl+X] interrupt",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled("[Esc] interrupt", Style::default().fg(Color::DarkGray)),
     ]))
 }
 
@@ -292,10 +281,7 @@ fn scroll_hint(state: &AppState) -> Line<'static> {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(
-            "  ·  ",
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled("  ·  ", Style::default().fg(Color::DarkGray)));
     }
     spans.push(Span::styled(
         format!("scrolled ↑{}", state.scroll_offset),

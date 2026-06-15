@@ -71,7 +71,11 @@ pub enum ContentPart {
         path: String,
         added: u32,
         removed: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none", rename = "originalPath")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "originalPath"
+        )]
         original_path: Option<String>,
     },
     Tree {

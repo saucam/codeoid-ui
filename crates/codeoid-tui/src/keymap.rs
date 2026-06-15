@@ -83,16 +83,14 @@ pub fn resolve(
             (Esc, _) => Some(Action::AskCancel),
             (Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
             (Char('?'), _) => Some(Action::ToggleHelp),
-            (Tab, _) | (Char('n'), _) | (Down, _) | (Char('j'), _) => {
-                Some(Action::AskNextQuestion)
-            }
+            (Tab, _) | (Char('n'), _) | (Down, _) | (Char('j'), _) => Some(Action::AskNextQuestion),
             (BackTab, _) | (Char('p'), _) | (Up, _) | (Char('k'), _) => {
                 Some(Action::AskPrevQuestion)
             }
             (Enter, _) => Some(Action::AskSubmit),
-            (Char(c @ '1'..='9'), KeyModifiers::NONE) => Some(Action::AskToggleOption(
-                (c as u8) - b'0',
-            )),
+            (Char(c @ '1'..='9'), KeyModifiers::NONE) => {
+                Some(Action::AskToggleOption((c as u8) - b'0'))
+            }
             _ => None,
         };
     }
@@ -200,8 +198,14 @@ mod tests {
         // Typing `q` with modal open dismisses (doesn't fall through to Quit
         // action, because dismiss comes first). Typing a plain letter
         // doesn't leak into navigation.
-        assert_eq!(resolve(key(KeyCode::Char('y')), false, ModalKind::Generic, false), None);
-        assert_eq!(resolve(key(KeyCode::Char('x')), false, ModalKind::Generic, false), None);
+        assert_eq!(
+            resolve(key(KeyCode::Char('y')), false, ModalKind::Generic, false),
+            None
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('x')), false, ModalKind::Generic, false),
+            None
+        );
     }
 
     #[test]
@@ -274,10 +278,22 @@ mod tests {
     fn prompt_focused_plain_typing_passes_through() {
         // Letters that aren't Ctrl+C or Ctrl+J should fall through to None
         // so the app reducer routes them into the TextArea.
-        assert_eq!(resolve(key(KeyCode::Char('a')), true, ModalKind::None, false), None);
-        assert_eq!(resolve(key(KeyCode::Char('x')), true, ModalKind::None, false), None);
-        assert_eq!(resolve(key(KeyCode::Backspace), true, ModalKind::None, false), None);
-        assert_eq!(resolve(key(KeyCode::Up), true, ModalKind::None, false), None);
+        assert_eq!(
+            resolve(key(KeyCode::Char('a')), true, ModalKind::None, false),
+            None
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('x')), true, ModalKind::None, false),
+            None
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Backspace), true, ModalKind::None, false),
+            None
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Up), true, ModalKind::None, false),
+            None
+        );
     }
 
     #[test]
@@ -325,34 +341,67 @@ mod tests {
     #[test]
     fn prompt_focused_plain_updown_still_routes_to_editor() {
         // Without Ctrl, arrow keys belong to the TextArea (cursor movement).
-        assert_eq!(resolve(key(KeyCode::Up), true, ModalKind::None, false), None);
-        assert_eq!(resolve(key(KeyCode::Down), true, ModalKind::None, false), None);
+        assert_eq!(
+            resolve(key(KeyCode::Up), true, ModalKind::None, false),
+            None
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Down), true, ModalKind::None, false),
+            None
+        );
     }
 
     #[test]
     fn prompt_focused_alt_yd_approve_deny() {
         let alt_y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::ALT);
         let alt_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT);
-        assert_eq!(resolve(alt_y, true, ModalKind::None, false), Some(Action::Approve));
-        assert_eq!(resolve(alt_d, true, ModalKind::None, false), Some(Action::Deny));
+        assert_eq!(
+            resolve(alt_y, true, ModalKind::None, false),
+            Some(Action::Approve)
+        );
+        assert_eq!(
+            resolve(alt_d, true, ModalKind::None, false),
+            Some(Action::Deny)
+        );
     }
 
     #[test]
     fn prompt_focused_alt_np_switches_sessions() {
         let alt_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT);
         let alt_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT);
-        assert_eq!(resolve(alt_n, true, ModalKind::None, false), Some(Action::NextSession));
-        assert_eq!(resolve(alt_p, true, ModalKind::None, false), Some(Action::PrevSession));
+        assert_eq!(
+            resolve(alt_n, true, ModalKind::None, false),
+            Some(Action::NextSession)
+        );
+        assert_eq!(
+            resolve(alt_p, true, ModalKind::None, false),
+            Some(Action::PrevSession)
+        );
     }
 
     #[test]
     fn prompt_focused_nav_keys_dont_leak() {
         // `n` / `p` without Alt are real letters — must NOT steal focus.
-        assert_eq!(resolve(key(KeyCode::Char('n')), true, ModalKind::None, false), None);
-        assert_eq!(resolve(key(KeyCode::Char('p')), true, ModalKind::None, false), None);
-        assert_eq!(resolve(key(KeyCode::Char('q')), true, ModalKind::None, false), None);
-        assert_eq!(resolve(key(KeyCode::Char('y')), true, ModalKind::None, false), None);
-        assert_eq!(resolve(key(KeyCode::Char('d')), true, ModalKind::None, false), None);
+        assert_eq!(
+            resolve(key(KeyCode::Char('n')), true, ModalKind::None, false),
+            None
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('p')), true, ModalKind::None, false),
+            None
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('q')), true, ModalKind::None, false),
+            None
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('y')), true, ModalKind::None, false),
+            None
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('d')), true, ModalKind::None, false),
+            None
+        );
     }
 
     #[test]
@@ -369,7 +418,10 @@ mod tests {
         // Without command mode, Tab falls through so the TextArea inserts
         // a real tab character (users rarely type tabs in prompts, but
         // the behaviour should be predictable).
-        assert_eq!(resolve(key(KeyCode::Tab), true, ModalKind::None, false), None);
+        assert_eq!(
+            resolve(key(KeyCode::Tab), true, ModalKind::None, false),
+            None
+        );
     }
 
     // ------------ nav mode (no prompt focus) ------------

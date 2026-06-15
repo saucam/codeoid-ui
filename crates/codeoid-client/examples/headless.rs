@@ -66,9 +66,17 @@ async fn list_models(handle: &ClientHandle) -> anyhow::Result<()> {
             live,
             ..
         }) => {
-            println!("models ({}): {}", if live { "live" } else { "fallback" }, models.len());
+            println!(
+                "models ({}): {}",
+                if live { "live" } else { "fallback" },
+                models.len()
+            );
             for m in models {
-                let def = if m.is_default.unwrap_or(false) { " (default)" } else { "" };
+                let def = if m.is_default.unwrap_or(false) {
+                    " (default)"
+                } else {
+                    ""
+                };
                 println!("  · {} — {}{}", m.value, m.display_name, def);
             }
         }
@@ -81,10 +89,9 @@ async fn list_sessions(handle: &ClientHandle) -> anyhow::Result<()> {
     let id = ClientHandle::next_request_id();
     let outcome = handle.request(ClientMessage::SessionList { id }).await?;
     match outcome {
-        codeoid_client::request::RequestOutcome::TypedResult(DaemonMessage::SessionListResult {
-            sessions,
-            ..
-        }) => {
+        codeoid_client::request::RequestOutcome::TypedResult(
+            DaemonMessage::SessionListResult { sessions, .. },
+        ) => {
             println!("sessions: {}", sessions.len());
             for s in sessions {
                 println!("  · {} [{}] — {:?}", s.name, s.id, s.status);

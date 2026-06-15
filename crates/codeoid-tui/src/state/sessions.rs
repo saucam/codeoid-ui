@@ -73,9 +73,10 @@ impl SessionList {
             self.focused = None;
             return;
         }
-        self.focused = Some(self.focused.map_or(0, |i| {
-            (i + self.items.len() - 1) % self.items.len()
-        }));
+        self.focused = Some(
+            self.focused
+                .map_or(0, |i| (i + self.items.len() - 1) % self.items.len()),
+        );
     }
 
     pub fn focus_id(&mut self, session_id: &str) {

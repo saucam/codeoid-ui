@@ -39,10 +39,7 @@ impl ScrollbackBuild {
     pub fn matches(&self, session_id: &str, width: u16, epoch: u64) -> bool {
         self.width == width
             && self.epoch == epoch
-            && self
-                .session_id
-                .as_deref()
-                .is_some_and(|s| s == session_id)
+            && self.session_id.as_deref().is_some_and(|s| s == session_id)
     }
 
     /// Drop the cached build. Used when a global toggle (e.g.

@@ -137,7 +137,8 @@ pub async fn connect(url: &str, token: &str) -> Result<Connected> {
     {
         let mut w = write.lock().await;
         let auth_frame = serde_json::json!({ "type": "auth", "token": token });
-        w.send(WsMessage::Text(auth_frame.to_string().into())).await?;
+        w.send(WsMessage::Text(auth_frame.to_string().into()))
+            .await?;
     }
 
     // Step 2: wait for auth.ok as the next message. Bail on anything else.
@@ -193,8 +194,7 @@ pub async fn connect(url: &str, token: &str) -> Result<Connected> {
     })
 }
 
-type ReadHalf =
-    futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
+type ReadHalf = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 type WriteHalf = Arc<
     Mutex<futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>>,
 >;
@@ -238,7 +238,9 @@ async fn await_auth_ok(read: &mut ReadHalf) -> Result<AuthOkMsg> {
 
     match deadline.await {
         Ok(result) => result,
-        Err(_) => Err(ClientError::AuthRejected("timed out waiting for auth.ok".into())),
+        Err(_) => Err(ClientError::AuthRejected(
+            "timed out waiting for auth.ok".into(),
+        )),
     }
 }
 
@@ -325,7 +327,10 @@ fn spawn_heartbeat(
             let idle_ms = now_ms.saturating_sub(last_activity.load(Ordering::Relaxed));
 
             if idle_ms >= HEARTBEAT_DEAD_AFTER_MS {
-                warn!(idle_ms, "heartbeat: no traffic in liveness window — connection is dead");
+                warn!(
+                    idle_ms,
+                    "heartbeat: no traffic in liveness window — connection is dead"
+                );
                 let _ = ev_tx
                     .send(StreamEvent::Errored(ClientError::HeartbeatTimeout))
                     .await;
@@ -378,11 +383,7 @@ fn spawn_writer(write: WriteHalf, mut rx: mpsc::Receiver<Outbound>) -> JoinHandl
     })
 }
 
-async fn route(
-    registry: &RequestRegistry,
-    ev_tx: &mpsc::Sender<StreamEvent>,
-    msg: DaemonMessage,
-) {
+async fn route(registry: &RequestRegistry, ev_tx: &mpsc::Sender<StreamEvent>, msg: DaemonMessage) {
     match msg {
         // Solicited — route to the request registry by id.
         DaemonMessage::ResponseOk { request_id, data } => {
@@ -412,10 +413,7 @@ async fn route(
                 | DaemonMessage::SessionSearchResult { request_id, .. } => request_id.clone(),
                 _ => unreachable!(),
             };
-            if !registry.complete(
-                &request_id,
-                RequestOutcome::TypedResult(clone_msg(&msg)),
-            ) {
+            if !registry.complete(&request_id, RequestOutcome::TypedResult(clone_msg(&msg))) {
                 // No one was waiting — forward as an event so the TUI can
                 // still display it.
                 let _ = ev_tx.send(StreamEvent::Daemon(msg)).await;

@@ -173,7 +173,11 @@ pub fn render_tool_block(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                if is_plan_mode { "approve plan · " } else { "approve · " },
+                if is_plan_mode {
+                    "approve plan · "
+                } else {
+                    "approve · "
+                },
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled(

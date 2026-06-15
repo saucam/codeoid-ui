@@ -40,7 +40,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     if focused {
         state.prompt.set_cursor_style(
             Style::default()
-                .bg(if command_mode { Color::Magenta } else { Color::Cyan })
+                .bg(if command_mode {
+                    Color::Magenta
+                } else {
+                    Color::Cyan
+                })
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD),
         );
@@ -69,26 +73,21 @@ fn build_title(
                 spans.push(Span::raw(" · "));
                 spans.push(Span::styled(
                     format!("/{q}"),
-                    Style::default()
-                        .fg(accent)
-                        .add_modifier(Modifier::ITALIC),
+                    Style::default().fg(accent).add_modifier(Modifier::ITALIC),
                 ));
             }
         }
     } else {
         spans.push(Span::styled(
-            if focused { "Prompt · typing" } else { "Prompt" },
-            Style::default()
-                .fg(accent)
-                .add_modifier(Modifier::BOLD),
+            if focused {
+                "Prompt · typing"
+            } else {
+                "Prompt"
+            },
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ));
         if !state.prompt_is_empty() {
-            let chars: usize = state
-                .prompt
-                .lines()
-                .iter()
-                .map(|l| l.chars().count())
-                .sum();
+            let chars: usize = state.prompt.lines().iter().map(|l| l.chars().count()).sum();
             let lines = state.prompt.lines().len();
             spans.push(Span::raw(" · "));
             spans.push(Span::styled(

@@ -77,10 +77,7 @@ impl RequestRegistry {
 /// Convert a [`RequestOutcome`] into a successful payload or a typed
 /// [`ClientError`]. Useful at call sites that want `?`-style error
 /// propagation.
-pub fn into_result(
-    outcome: RequestOutcome,
-    request_id: &str,
-) -> Result<Option<serde_json::Value>> {
+pub fn into_result(outcome: RequestOutcome, request_id: &str) -> Result<Option<serde_json::Value>> {
     match outcome {
         RequestOutcome::Ok(data) => Ok(data),
         RequestOutcome::TypedResult(_) => Ok(None),

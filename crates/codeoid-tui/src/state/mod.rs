@@ -130,9 +130,7 @@ pub enum ConnectionState {
         next_attempt_in_secs: u64,
     },
     /// Terminal error; no further reconnect attempts.
-    Failed {
-        reason: String,
-    },
+    Failed { reason: String },
 }
 
 impl AppState {
@@ -460,7 +458,9 @@ impl AskUserQuestionModal {
     /// flips the selection to that option (replacing prior). For
     /// multi-select, adds/removes from the set.
     pub fn toggle_option(&mut self, idx: usize) {
-        let Some(q) = self.questions.get_mut(self.focused_question) else { return };
+        let Some(q) = self.questions.get_mut(self.focused_question) else {
+            return;
+        };
         if idx >= q.options.len() {
             return;
         }
@@ -607,7 +607,10 @@ mod tests {
     fn note_attached_is_idempotent() {
         let mut state = mk_state();
         assert!(state.note_attached("s1"));
-        assert!(!state.note_attached("s1"), "second call should return false");
+        assert!(
+            !state.note_attached("s1"),
+            "second call should return false"
+        );
         assert!(state.note_attached("s2"));
     }
 
@@ -701,7 +704,7 @@ mod tests {
         state.note_total_rendered(100);
         state.scroll_up(10);
         state.note_total_rendered(115); // +15 unseen, scroll=25
-        // PgDn: scroll all the way back.
+                                        // PgDn: scroll all the way back.
         state.scroll_down(100); // saturates to 0
         assert_eq!(state.scroll_offset, 0);
         assert_eq!(state.unseen_below_rows, 0);
@@ -725,7 +728,7 @@ mod tests {
         state.note_total_rendered(500);
         state.scroll_up(100);
         state.note_total_rendered(50); // huge shrink
-        // No bump applied (delta is negative); last_total updates.
+                                       // No bump applied (delta is negative); last_total updates.
         assert_eq!(state.scroll_offset, 100);
         assert_eq!(state.unseen_below_rows, 0);
         assert_eq!(state.last_total_rendered, 50);

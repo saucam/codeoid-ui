@@ -21,9 +21,7 @@ pub enum SlashCommand {
     /// `/rename <new-name>` — rename the focused session. `new-name` may
     /// contain spaces; everything after the command is treated as the
     /// full name (trimmed).
-    Rename {
-        name: String,
-    },
+    Rename { name: String },
     /// `/destroy` — destroy the currently focused session.
     Destroy,
     /// `/interrupt` — interrupt the currently focused session.
@@ -51,9 +49,7 @@ pub enum SlashCommand {
     Capabilities(CapabilitiesTab),
     /// `/export [path]` — write the focused session to a JSON bundle
     /// (under `~/.codeoid/exports/` by default; or to the given path).
-    Export {
-        path: Option<String>,
-    },
+    Export { path: Option<String> },
     /// `/import <bundle.json> <target-workdir>` — fork a bundle into a
     /// fresh session anchored at `target-workdir`.
     Import {
@@ -182,7 +178,10 @@ pub fn parse(text: &str) -> Result<Option<SlashCommand>, ParseError> {
             }
         }
         "mode" => {
-            let arg = rest_of_line.first().copied().ok_or(ParseError::ModeMissingArg)?;
+            let arg = rest_of_line
+                .first()
+                .copied()
+                .ok_or(ParseError::ModeMissingArg)?;
             let mode = match arg {
                 "interactive" | "i" => SessionMode::Interactive,
                 "auto-allow" | "auto" | "a" => SessionMode::AutoAllow,
@@ -207,7 +206,10 @@ pub const CATALOG: &[(&str, &str)] = &[
     ("/approve", "approve the pending tool"),
     ("/deny", "deny the pending tool"),
     ("/mode <mode>", "interactive | auto | autonomous"),
-    ("/model [value]", "list models, or switch the focused session"),
+    (
+        "/model [value]",
+        "list models, or switch the focused session",
+    ),
     ("/who", "show your ZeroID identity + scopes"),
     ("/rotate", "rotate the backing context"),
     ("/help", "show the help modal"),
@@ -217,7 +219,10 @@ pub const CATALOG: &[(&str, &str)] = &[
     ("/mcp", "list MCP servers wired in"),
     ("/hooks", "list PreToolUse / PostToolUse hooks"),
     ("/export [path]", "export session as a portable bundle"),
-    ("/import <bundle> <workdir>", "fork a bundle into a new session"),
+    (
+        "/import <bundle> <workdir>",
+        "fork a bundle into a new session",
+    ),
 ];
 
 /// Entries whose command name (before the first space) is a prefix match
@@ -251,10 +256,7 @@ pub fn unique_completion(query: &str) -> Option<&'static str> {
     }
     let usage = matches[0].0;
     // Extract just the command name for completion.
-    usage
-        .trim_start_matches('/')
-        .split_whitespace()
-        .next()
+    usage.trim_start_matches('/').split_whitespace().next()
 }
 
 #[cfg(test)]
@@ -371,10 +373,13 @@ mod tests {
     #[test]
     fn case_insensitive() {
         assert_eq!(parse("/Help"), Ok(Some(SlashCommand::Help)));
-        assert_eq!(parse("/NEW demo"), Ok(Some(SlashCommand::New {
-            name: "demo".into(),
-            workdir: None,
-        })));
+        assert_eq!(
+            parse("/NEW demo"),
+            Ok(Some(SlashCommand::New {
+                name: "demo".into(),
+                workdir: None,
+            }))
+        );
     }
 
     #[test]

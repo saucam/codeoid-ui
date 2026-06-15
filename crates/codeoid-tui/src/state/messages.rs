@@ -65,7 +65,10 @@ impl MessageStore {
     }
 
     fn bump_session(&mut self, session_id: &str) {
-        let entry = self.session_epoch.entry(session_id.to_string()).or_insert(0);
+        let entry = self
+            .session_epoch
+            .entry(session_id.to_string())
+            .or_insert(0);
         *entry = entry.wrapping_add(1);
     }
 
@@ -184,8 +187,7 @@ impl MessageStore {
 mod tests {
     use super::*;
     use codeoid_protocol::{
-        CancelReason, ContentPart, IdentityType, MessageIdentity, MessageRole, ToolInfo,
-        ToolState,
+        CancelReason, ContentPart, IdentityType, MessageIdentity, MessageRole, ToolInfo, ToolState,
     };
 
     fn mk_msg(session_id: &str, message_id: &str) -> SessionMessage {

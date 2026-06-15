@@ -7,9 +7,7 @@
 //! Claude-code-style "working" prefix like `⠏ Thinking…`.
 
 /// 10-frame Braille dot spinner — same glyph set as Claude Code / npm CLI.
-pub const BRAILLE: &[&str] = &[
-    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-];
+pub const BRAILLE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Expressive verb rotation. Cycle slowly (every 30 ticks ≈ 3 s) so the TUI
 /// feels alive without fighting for the user's attention.

@@ -145,7 +145,12 @@ fn setup_terminal(mouse: bool) -> Result<Terminal<CrosstermBackend<io::Stdout>>>
     // capture is on, which is the standard convention used by Helix,
     // Zellij, and Alacritty-with-mouse.
     if mouse {
-        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )?;
     } else {
         execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     }
@@ -166,7 +171,11 @@ fn restore_terminal(
             LeaveAlternateScreen
         )?;
     } else {
-        execute!(terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen)?;
+        execute!(
+            terminal.backend_mut(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        )?;
     }
     terminal.show_cursor()?;
     Ok(())

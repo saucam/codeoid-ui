@@ -207,10 +207,7 @@ mod tests {
         // (cols 4..14, w=10 → 's' at col 11 wraps with break at 3),
         // remainder "supercalifragilistic" (20 chars) needs 2 more rows.
         let rows = rendered_rows(&line("hi supercalifragilistic"), 10);
-        assert!(
-            (3..=4).contains(&rows),
-            "expected 3 or 4 rows, got {rows}"
-        );
+        assert!((3..=4).contains(&rows), "expected 3 or 4 rows, got {rows}");
     }
 
     #[test]

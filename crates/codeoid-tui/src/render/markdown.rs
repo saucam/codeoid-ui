@@ -44,7 +44,9 @@ pub fn render_markdown_block(text: &str, indent: &str) -> Vec<Line<'static>> {
                     Span::styled("┌─ ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
                         lang_label.to_string(),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::ITALIC),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::ITALIC),
                     ),
                 ]));
             }
@@ -73,10 +75,7 @@ pub fn render_markdown_block(text: &str, indent: &str) -> Vec<Line<'static>> {
         if raw.trim() == "---" || raw.trim() == "***" {
             out.push(Line::from(vec![
                 Span::raw(indent.to_owned()),
-                Span::styled(
-                    "─".repeat(40),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled("─".repeat(40), Style::default().fg(Color::DarkGray)),
             ]));
             continue;
         }
@@ -192,10 +191,7 @@ pub fn inline_spans(line: &str, base: Style) -> Vec<Span<'static>> {
                     bold.push(n);
                     chars.next();
                 }
-                spans.push(Span::styled(
-                    bold,
-                    base.add_modifier(Modifier::BOLD),
-                ));
+                spans.push(Span::styled(bold, base.add_modifier(Modifier::BOLD)));
             }
             '*' | '_' => {
                 flush(&mut buf, &mut spans);
@@ -209,10 +205,7 @@ pub fn inline_spans(line: &str, base: Style) -> Vec<Span<'static>> {
                     italic.push(n);
                     chars.next();
                 }
-                spans.push(Span::styled(
-                    italic,
-                    base.add_modifier(Modifier::ITALIC),
-                ));
+                spans.push(Span::styled(italic, base.add_modifier(Modifier::ITALIC)));
             }
             _ => buf.push(c),
         }
@@ -235,11 +228,7 @@ mod tests {
     fn plain_text_roundtrips() {
         let lines = render_markdown_block("hello world", "");
         assert_eq!(lines.len(), 1);
-        let joined: String = lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(joined, "hello world");
     }
 
@@ -247,7 +236,10 @@ mod tests {
     fn header_gets_styled() {
         let lines = render_markdown_block("## Heading", "");
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].spans.iter().any(|s| s.content.as_ref() == "Heading"));
+        assert!(lines[0]
+            .spans
+            .iter()
+            .any(|s| s.content.as_ref() == "Heading"));
     }
 
     #[test]

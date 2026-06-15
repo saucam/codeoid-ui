@@ -37,10 +37,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let mut spans: Vec<Span<'_>> = Vec::with_capacity(hints.len() * 4);
     for (i, (key, desc)) in hints.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(
-                " · ",
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
         }
         spans.push(Span::styled(
             (*key).to_string(),

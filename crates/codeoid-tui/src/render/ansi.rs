@@ -177,9 +177,7 @@ impl AnsiParser {
                 8 => self.style = self.style.add_modifier(Modifier::HIDDEN),
                 9 => self.style = self.style.add_modifier(Modifier::CROSSED_OUT),
                 22 => {
-                    self.style = self
-                        .style
-                        .remove_modifier(Modifier::BOLD | Modifier::DIM);
+                    self.style = self.style.remove_modifier(Modifier::BOLD | Modifier::DIM);
                 }
                 23 => self.style = self.style.remove_modifier(Modifier::ITALIC),
                 24 => self.style = self.style.remove_modifier(Modifier::UNDERLINED),
@@ -285,7 +283,12 @@ mod tests {
     fn first_line_text(lines: &[Line<'static>]) -> String {
         lines
             .first()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .unwrap_or_default()
     }
 

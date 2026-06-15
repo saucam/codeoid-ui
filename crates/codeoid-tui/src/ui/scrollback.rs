@@ -9,9 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::render::{
-    parse_ansi, render_markdown_block, render_tool_block, sanitize_for_display,
-};
+use crate::render::{parse_ansi, render_markdown_block, render_tool_block, sanitize_for_display};
 use crate::state::{AppState, Focus};
 
 const BODY_INDENT: &str = "  ";
@@ -109,20 +107,15 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             let version = messages.version_of(&m.message_id);
             let per_block_expanded = expanded_ids.contains(&m.message_id);
             let is_selected = selected_id.as_deref() == Some(m.message_id.as_str());
-            let rendered = render_cache.get_or_render(
-                &m.message_id,
-                version,
-                inner_width,
-                skip_cache,
-                || {
+            let rendered =
+                render_cache.get_or_render(&m.message_id, version, inner_width, skip_cache, || {
                     render_message(
                         m,
                         anim_tick,
                         verbose_tools || per_block_expanded,
                         is_selected,
                     )
-                },
-            );
+                });
             if rendered.is_empty() {
                 // Placeholder messages (empty assistant/thinking
                 // mid-stream) don't render in the transcript — the
@@ -388,10 +381,7 @@ fn role_header(m: &SessionMessage) -> Line<'static> {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        MessageRole::ToolResult => (
-            "tool output",
-            Style::default().fg(Color::Magenta),
-        ),
+        MessageRole::ToolResult => ("tool output", Style::default().fg(Color::Magenta)),
         MessageRole::System => (
             "system",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -419,10 +409,7 @@ fn role_header(m: &SessionMessage) -> Line<'static> {
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
         ),
-        Span::styled(
-            format!("   {time}"),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(format!("   {time}"), Style::default().fg(Color::DarkGray)),
     ])
 }
 
@@ -431,7 +418,14 @@ fn role_header(m: &SessionMessage) -> Line<'static> {
 fn fmt_timestamp(raw: &str) -> String {
     match chrono::DateTime::parse_from_rfc3339(raw) {
         Ok(dt) => dt.format("%H:%M:%S").to_string(),
-        Err(_) => raw.chars().rev().take(8).collect::<String>().chars().rev().collect(),
+        Err(_) => raw
+            .chars()
+            .rev()
+            .take(8)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect(),
     }
 }
 

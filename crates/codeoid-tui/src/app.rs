@@ -12,9 +12,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use codeoid_client::{connect, ClientHandle, Connected, StreamEvent};
-use codeoid_protocol::{
-    ClientMessage, DaemonMessage, SessionMode, SessionStatus, ToolState,
-};
+use codeoid_protocol::{ClientMessage, DaemonMessage, SessionMode, SessionStatus, ToolState};
 use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKind};
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
@@ -190,9 +188,7 @@ impl App {
             // actually running — otherwise we'd repaint the screen 10×/s
             // for no reason, destroying native terminal text selection.
             dirty = if is_tick {
-                self.state
-                    .as_ref()
-                    .is_some_and(needs_animation_frame)
+                self.state.as_ref().is_some_and(needs_animation_frame)
             } else {
                 true
             };
@@ -207,13 +203,37 @@ impl App {
             AppEvent::Terminal(CtEvent::Key(key)) if key.kind == KeyEventKind::Press => {
                 let prompt_focused = state.focus == Focus::Prompt;
                 let modal_kind = match state.modal.as_ref() {
-                    Some(crate::state::Modal::AskUserQuestion(_)) => crate::keymap::ModalKind::AskUserQuestion,
+                    Some(crate::state::Modal::AskUserQuestion(_)) => {
+                        crate::keymap::ModalKind::AskUserQuestion
+                    }
                     Some(_) => crate::keymap::ModalKind::Generic,
                     None => crate::keymap::ModalKind::None,
                 };
                 let modal_open = !matches!(modal_kind, crate::keymap::ModalKind::None);
                 let command_mode = state.is_command_mode();
-                if let Some(action) = resolve(key, prompt_focused, modal_kind, command_mode) {
+
+                // Esc interrupts a busy focused session — Claude Code parity.
+                // This binding is runtime-conditional (depends on live session
+                // status), which the static keymap table can't express, so it's
+                // resolved here ahead of resolve()'s context-free Esc (blur
+                // prompt in prompt mode / no-op in nav). When a modal is open we
+                // defer to resolve() so Esc closes the modal first. Ctrl+X and
+                // `.` remain the unconditional interrupt aliases in the keymap.
+                let esc_interrupts = matches!(key.code, crossterm::event::KeyCode::Esc)
+                    && !modal_open
+                    && state.sessions.focused().is_some_and(|s| {
+                        matches!(
+                            s.status,
+                            SessionStatus::Working | SessionStatus::WaitingApproval
+                        )
+                    });
+                let action = if esc_interrupts {
+                    Some(crate::keymap::Action::Interrupt)
+                } else {
+                    resolve(key, prompt_focused, modal_kind, command_mode)
+                };
+
+                if let Some(action) = action {
                     self.apply_action(action).await;
                 } else if prompt_focused && !modal_open {
                     // Anything keymap didn't handle goes straight to the
@@ -247,7 +267,9 @@ impl App {
     }
 
     async fn apply_action(&mut self, action: Action) {
-        let Some(state) = self.state.as_mut() else { return };
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
         match action {
             Action::Quit => self.quit_requested = true,
             Action::FocusPrompt => state.focus = Focus::Prompt,
@@ -325,14 +347,20 @@ impl App {
 
     async fn submit_ask_user_question(&mut self) {
         let payload = {
-            let Some(state) = self.state.as_mut() else { return };
-            let Some(Modal::AskUserQuestion(m)) = state.modal.as_ref() else { return };
+            let Some(state) = self.state.as_mut() else {
+                return;
+            };
+            let Some(Modal::AskUserQuestion(m)) = state.modal.as_ref() else {
+                return;
+            };
             if !m.all_answered() {
                 return;
             }
             let answers = m.build_answers();
             let answers_value = serde_json::to_value(answers).ok();
-            let Some(answers_value) = answers_value else { return };
+            let Some(answers_value) = answers_value else {
+                return;
+            };
             let mut updated = serde_json::Map::new();
             updated.insert("answers".to_string(), answers_value);
             (
@@ -345,7 +373,9 @@ impl App {
             state.modal = None;
         }
         let (session_id, approval_id, updated_input) = payload;
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let id = ClientHandle::next_request_id();
         if let Err(e) = handle
             .send(ClientMessage::SessionApprove {
@@ -365,15 +395,21 @@ impl App {
 
     async fn cancel_ask_user_question(&mut self) {
         let payload = {
-            let Some(state) = self.state.as_mut() else { return };
-            let Some(Modal::AskUserQuestion(m)) = state.modal.as_ref() else { return };
+            let Some(state) = self.state.as_mut() else {
+                return;
+            };
+            let Some(Modal::AskUserQuestion(m)) = state.modal.as_ref() else {
+                return;
+            };
             (m.session_id.clone(), m.approval_id.clone())
         };
         if let Some(state) = self.state.as_mut() {
             state.modal = None;
         }
         let (session_id, approval_id) = payload;
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let id = ClientHandle::next_request_id();
         let _ = handle
             .send(ClientMessage::SessionApprove {
@@ -645,7 +681,9 @@ impl App {
 
     async fn submit_prompt(&mut self) {
         let text = {
-            let Some(state) = self.state.as_mut() else { return };
+            let Some(state) = self.state.as_mut() else {
+                return;
+            };
             let Some(text) = state.take_prompt() else {
                 return;
             };
@@ -805,7 +843,9 @@ impl App {
             }
             return;
         };
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let id = ClientHandle::next_request_id();
         let msg = ClientMessage::SessionExport {
             id,
@@ -826,7 +866,9 @@ impl App {
     }
 
     async fn import_bundle(&mut self, bundle_path: String, target_workdir: String) {
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let id = ClientHandle::next_request_id();
         let msg = ClientMessage::SessionImport {
             id,
@@ -865,7 +907,9 @@ impl App {
             modal.pending_request_id = Some(request_id.clone());
             state.modal = Some(Modal::Capabilities(modal));
         }
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let msg = ClientMessage::ClaudeConfig {
             id: request_id,
             session_id,
@@ -891,7 +935,9 @@ impl App {
             }
             return;
         };
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let id = ClientHandle::next_request_id();
         let msg = ClientMessage::SessionRename {
             id,
@@ -916,7 +962,9 @@ impl App {
             })
             .unwrap_or_else(|| "/tmp".into());
 
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let id = ClientHandle::next_request_id();
         let msg = ClientMessage::SessionCreate {
             id,
@@ -931,7 +979,9 @@ impl App {
         }
         // Refresh the session list so the new tab shows up.
         let list_id = ClientHandle::next_request_id();
-        let _ = handle.send(ClientMessage::SessionList { id: list_id }).await;
+        let _ = handle
+            .send(ClientMessage::SessionList { id: list_id })
+            .await;
         if let Some(state) = self.state.as_mut() {
             state.last_error = None;
         }
@@ -946,13 +996,17 @@ impl App {
         else {
             return;
         };
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let id = ClientHandle::next_request_id();
         let _ = handle
             .send(ClientMessage::SessionDestroy { id, session_id })
             .await;
         let list_id = ClientHandle::next_request_id();
-        let _ = handle.send(ClientMessage::SessionList { id: list_id }).await;
+        let _ = handle
+            .send(ClientMessage::SessionList { id: list_id })
+            .await;
     }
 
     async fn rotate_focused(&mut self) {
@@ -963,7 +1017,9 @@ impl App {
         else {
             return;
         };
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let id = ClientHandle::next_request_id();
         let _ = handle
             .send(ClientMessage::SessionRotate { id, session_id })
@@ -978,7 +1034,9 @@ impl App {
         else {
             return;
         };
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let id = ClientHandle::next_request_id();
         let _ = handle
             .send(ClientMessage::SessionSetMode {
@@ -993,7 +1051,9 @@ impl App {
     /// `/model` with no arg — list the catalog (and mark the current +
     /// default) in the footer.
     fn list_models(&mut self) {
-        let Some(state) = self.state.as_mut() else { return };
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
         if state.models.is_empty() {
             state.record_error("models: catalog not loaded yet — try again in a moment");
             return;
@@ -1014,8 +1074,14 @@ impl App {
             })
             .collect::<Vec<_>>()
             .join("  ·  ");
-        let src = if state.models_live { "live" } else { "fallback" };
-        state.record_error(format!("models ({src}): {list}   — /model <value> to switch"));
+        let src = if state.models_live {
+            "live"
+        } else {
+            "fallback"
+        };
+        state.record_error(format!(
+            "models ({src}): {list}   — /model <value> to switch"
+        ));
     }
 
     /// `/model <value>` — validate against the catalog, then switch the
@@ -1035,7 +1101,9 @@ impl App {
             NoSession,
         }
         let plan = {
-            let Some(state) = self.state.as_ref() else { return };
+            let Some(state) = self.state.as_ref() else {
+                return;
+            };
             if !state.models.is_empty() && !state.models.iter().any(|m| m.value == value) {
                 let valid = state
                     .models
@@ -1067,7 +1135,9 @@ impl App {
             }
         };
 
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let id = ClientHandle::next_request_id();
         if let Err(e) = handle
             .send(ClientMessage::SessionSetModel {
@@ -1089,7 +1159,9 @@ impl App {
 
     /// `/who` — surface the authenticated ZeroID identity + scope count.
     fn show_who(&mut self) {
-        let Some(state) = self.state.as_mut() else { return };
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
         let sub = state.auth.identity.sub.clone();
         let name = state
             .auth
@@ -1102,7 +1174,9 @@ impl App {
     }
 
     async fn ensure_attached(&mut self) {
-        let Some(state) = self.state.as_ref() else { return };
+        let Some(state) = self.state.as_ref() else {
+            return;
+        };
         let Some(id) = state.sessions.focused_id().map(ToString::to_string) else {
             return;
         };
@@ -1122,12 +1196,16 @@ impl App {
     /// list.
     async fn attach_if_needed(&mut self, session_id: String) {
         {
-            let Some(state) = self.state.as_mut() else { return };
+            let Some(state) = self.state.as_mut() else {
+                return;
+            };
             if !state.note_attached(&session_id) {
                 return;
             }
         }
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let msg = ClientMessage::SessionAttach {
             id: ClientHandle::next_request_id(),
             session_id: session_id.clone(),
@@ -1142,10 +1220,16 @@ impl App {
     }
 
     async fn interrupt(&mut self) {
-        let Some(state) = self.state.as_ref() else { return };
-        let Some(session) = state.sessions.focused() else { return };
+        let Some(state) = self.state.as_ref() else {
+            return;
+        };
+        let Some(session) = state.sessions.focused() else {
+            return;
+        };
         let sid = session.id.clone();
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let id = ClientHandle::next_request_id();
         if let Err(e) = handle
             .send(ClientMessage::SessionInterrupt {
@@ -1162,8 +1246,12 @@ impl App {
 
     async fn approve(&mut self, approved: bool) {
         let (session_id, approval_id) = {
-            let Some(state) = self.state.as_ref() else { return };
-            let Some(session) = state.sessions.focused() else { return };
+            let Some(state) = self.state.as_ref() else {
+                return;
+            };
+            let Some(session) = state.sessions.focused() else {
+                return;
+            };
             let sid = session.id.clone();
             let Some(approval_id) = find_latest_approval(state, &sid) else {
                 return;
@@ -1177,17 +1265,16 @@ impl App {
         // just like it would for any other tool.
         if approved {
             if let Some(state) = self.state.as_mut() {
-                if let Some(modal) = build_ask_user_question_modal(
-                    state,
-                    &session_id,
-                    &approval_id,
-                ) {
+                if let Some(modal) = build_ask_user_question_modal(state, &session_id, &approval_id)
+                {
                     state.modal = Some(Modal::AskUserQuestion(modal));
                     return;
                 }
             }
         }
-        let Some(handle) = self.handle.clone() else { return };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
         let id = ClientHandle::next_request_id();
         if let Err(e) = handle
             .send(ClientMessage::SessionApprove {
@@ -1214,7 +1301,9 @@ impl App {
 fn autocomplete_command(state: &mut AppState) {
     use tui_textarea::TextArea;
 
-    let Some(query) = state.command_query() else { return };
+    let Some(query) = state.command_query() else {
+        return;
+    };
     let Some(full) = commands::unique_completion(query) else {
         return;
     };
@@ -1293,14 +1382,12 @@ fn build_ask_user_question_modal(
     use crate::state::{AskOption, AskUserQuestionModal, AskUserQuestionState};
 
     let msg = state.messages.messages(session_id).iter().rev().find(|m| {
-        m.tool
-            .as_ref()
-            .is_some_and(|t| match &t.state {
-                codeoid_protocol::ToolState::WaitingConfirmation { approval_id: aid, .. } => {
-                    aid == approval_id
-                }
-                _ => false,
-            })
+        m.tool.as_ref().is_some_and(|t| match &t.state {
+            codeoid_protocol::ToolState::WaitingConfirmation {
+                approval_id: aid, ..
+            } => aid == approval_id,
+            _ => false,
+        })
     })?;
     let tool = msg.tool.as_ref()?;
     let name = tool.name.as_str();
@@ -1316,7 +1403,10 @@ fn build_ask_user_question_modal(
     for q in questions_val {
         let question_text = q.get("question")?.as_str()?.to_string();
         let header = q.get("header").and_then(|h| h.as_str()).map(str::to_string);
-        let multi_select = q.get("multiSelect").and_then(|b| b.as_bool()).unwrap_or(false);
+        let multi_select = q
+            .get("multiSelect")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
         let options_val = q.get("options")?.as_array()?;
         let options: Vec<AskOption> = options_val
             .iter()
@@ -1368,4 +1458,3 @@ fn find_latest_approval(state: &AppState, session_id: &str) -> Option<String> {
         })
         .next()
 }
-

@@ -26,12 +26,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     render_usage(frame, cols[2], state);
 }
 
-fn render_connection_pill(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    conn: &ConnectionState,
-    tick: u64,
-) {
+fn render_connection_pill(frame: &mut Frame<'_>, area: Rect, conn: &ConnectionState, tick: u64) {
     let content = match conn {
         ConnectionState::Connected => Line::from(Span::styled(
             "● connected",
@@ -45,10 +40,7 @@ fn render_connection_pill(
         } => {
             let spinner = SpinnerFrame::for_tick(tick).glyph();
             Line::from(vec![
-                Span::styled(
-                    format!("{spinner} "),
-                    Style::default().fg(Color::Yellow),
-                ),
+                Span::styled(format!("{spinner} "), Style::default().fg(Color::Yellow)),
                 Span::styled(
                     format!("reconnecting ({attempt}/5)·{next_attempt_in_secs}s"),
                     Style::default().fg(Color::Yellow),
@@ -61,14 +53,12 @@ fn render_connection_pill(
         )),
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            " Codeoid ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
+    let block = Block::default().borders(Borders::ALL).title(Span::styled(
+        " Codeoid ",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(ratatui::widgets::Paragraph::new(content), inner);
@@ -94,18 +84,12 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Line::from(vec![
                 Span::styled(format!("{icon} "), status_color(s.status)),
                 Span::raw(s.name.clone()),
-                Span::styled(
-                    mode_tag.to_string(),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(mode_tag.to_string(), Style::default().fg(Color::DarkGray)),
             ])
         })
         .collect();
 
-    let title = format!(
-        " Sessions ({}) ",
-        state.sessions.items().len()
-    );
+    let title = format!(" Sessions ({}) ", state.sessions.items().len());
     let block = Block::default().borders(Borders::ALL).title(title);
 
     if items.is_empty() {
@@ -151,7 +135,12 @@ fn render_usage(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         let cost = format!("${:.3}", usage.total_cost_usd);
         let model = session.model.as_deref().unwrap_or("—");
         Line::from(vec![
-            Span::styled(cost, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                cost,
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::styled(
                 format!(

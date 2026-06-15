@@ -166,12 +166,8 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SessionImportSource {
-    Inline {
-        bundle: serde_json::Value,
-    },
-    File {
-        path: String,
-    },
+    Inline { bundle: serde_json::Value },
+    File { path: String },
 }
 
 impl ClientMessage {

@@ -6,9 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::state::{
-    AppState, AskUserQuestionModal, CapabilitiesModal, CapabilitiesTab, Modal,
-};
+use crate::state::{AppState, AskUserQuestionModal, CapabilitiesModal, CapabilitiesTab, Modal};
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     // Signature matches the scope needed here; the rest of the tree can
@@ -64,7 +62,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         bind("Shift+Enter / Ctrl+J", "newline"),
         bind("y", "approve pending tool"),
         bind("d", "deny pending tool"),
-        bind("Ctrl+X / .", "interrupt session"),
+        bind("Esc / Ctrl+X / .", "interrupt running turn"),
         bind("m", "cycle execution mode"),
         Line::raw(""),
         heading("Ask-user-question"),
@@ -110,14 +108,12 @@ fn render_confirm_destroy(frame: &mut Frame<'_>, area: Rect, name: &str) {
             Span::raw("cancel"),
         ]),
     ];
-    let p = Paragraph::new(body)
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Confirm destroy ")
-                .border_style(Style::default().fg(Color::Red)),
-        );
+    let p = Paragraph::new(body).alignment(Alignment::Center).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Confirm destroy ")
+            .border_style(Style::default().fg(Color::Red)),
+    );
     frame.render_widget(p, area);
 }
 
@@ -131,20 +127,38 @@ fn render_capabilities(frame: &mut Frame<'_>, area: Rect, c: &CapabilitiesModal)
 
     let mut rows: Vec<Line<'static>> = Vec::new();
     rows.push(Line::from(vec![
-        tab_pill("Agents", matches!(c.tab, CapabilitiesTab::Agents), c.agents.len()),
+        tab_pill(
+            "Agents",
+            matches!(c.tab, CapabilitiesTab::Agents),
+            c.agents.len(),
+        ),
         Span::raw("  "),
-        tab_pill("Skills", matches!(c.tab, CapabilitiesTab::Skills), c.skills.len()),
+        tab_pill(
+            "Skills",
+            matches!(c.tab, CapabilitiesTab::Skills),
+            c.skills.len(),
+        ),
         Span::raw("  "),
-        tab_pill("MCP", matches!(c.tab, CapabilitiesTab::Mcp), c.mcp_servers.len()),
+        tab_pill(
+            "MCP",
+            matches!(c.tab, CapabilitiesTab::Mcp),
+            c.mcp_servers.len(),
+        ),
         Span::raw("  "),
-        tab_pill("Hooks", matches!(c.tab, CapabilitiesTab::Hooks), c.hooks.len()),
+        tab_pill(
+            "Hooks",
+            matches!(c.tab, CapabilitiesTab::Hooks),
+            c.hooks.len(),
+        ),
     ]));
     if let Some(workdir) = &c.workdir {
         rows.push(Line::from(vec![
             Span::styled("workdir ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 workdir.clone(),
-                Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::ITALIC),
             ),
         ]));
     }
@@ -175,10 +189,7 @@ fn render_capabilities(frame: &mut Frame<'_>, area: Rect, c: &CapabilitiesModal)
                             if !tools.is_empty() {
                                 rows.push(Line::from(vec![
                                     Span::raw("    "),
-                                    Span::styled(
-                                        "tools: ",
-                                        Style::default().fg(Color::DarkGray),
-                                    ),
+                                    Span::styled("tools: ", Style::default().fg(Color::DarkGray)),
                                     Span::styled(
                                         tools.join(", "),
                                         Style::default().fg(Color::Gray),
@@ -244,10 +255,7 @@ fn render_capabilities(frame: &mut Frame<'_>, area: Rect, c: &CapabilitiesModal)
                                 rows.push(Line::from(vec![
                                     Span::raw("    "),
                                     Span::styled(
-                                        format!(
-                                            "header keys (redacted): {}",
-                                            headers.join(", ")
-                                        ),
+                                        format!("header keys (redacted): {}", headers.join(", ")),
                                         Style::default().fg(Color::DarkGray),
                                     ),
                                 ]));
@@ -320,7 +328,9 @@ fn item_header(name: &str, scope: &'static str) -> Line<'static> {
         Span::raw("  "),
         Span::styled(
             name.to_string(),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         scope_pill_str(scope),
@@ -337,14 +347,24 @@ fn item_desc(desc: &str) -> Line<'static> {
 fn item_path(p: &str) -> Line<'static> {
     Line::from(vec![
         Span::raw("    "),
-        Span::styled(p.to_string(), Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+        Span::styled(
+            p.to_string(),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ),
     ])
 }
 
 fn empty_hint(text: &'static str) -> Line<'static> {
     Line::from(vec![
         Span::raw("  "),
-        Span::styled(text, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+        Span::styled(
+            text,
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ),
     ])
 }
 
@@ -374,7 +394,9 @@ fn scope_pill_str(label: &'static str) -> Span<'static> {
 fn heading(text: &'static str) -> Line<'static> {
     Line::from(Span::styled(
         text,
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -383,7 +405,9 @@ fn bind(keys: &'static str, description: &'static str) -> Line<'static> {
         Span::raw("  "),
         Span::styled(
             format!("{keys:<22}"),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(description),
     ])
@@ -394,10 +418,16 @@ fn render_ask_user_question(frame: &mut Frame<'_>, area: Rect, m: &AskUserQuesti
     rows.push(Line::from(vec![
         Span::styled(
             "Claude is asking ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("({} question{})", m.questions.len(), if m.questions.len() == 1 { "" } else { "s" }),
+            format!(
+                "({} question{})",
+                m.questions.len(),
+                if m.questions.len() == 1 { "" } else { "s" }
+            ),
             Style::default().fg(Color::DarkGray),
         ),
     ]));
@@ -407,9 +437,13 @@ fn render_ask_user_question(frame: &mut Frame<'_>, area: Rect, m: &AskUserQuesti
         let is_focused_q = qi == m.focused_question;
         let prefix = if is_focused_q { "▶ " } else { "  " };
         let q_style = if is_focused_q {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
         };
         let multi_hint = if q.multi_select {
             " (pick one or more)"
@@ -423,17 +457,26 @@ fn render_ask_user_question(frame: &mut Frame<'_>, area: Rect, m: &AskUserQuesti
                 Style::default().fg(Color::Magenta),
             ));
         }
-        header_spans.push(Span::styled(format!("Q{}: {}", qi + 1, q.question), q_style));
+        header_spans.push(Span::styled(
+            format!("Q{}: {}", qi + 1, q.question),
+            q_style,
+        ));
         header_spans.push(Span::styled(
             multi_hint.to_string(),
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
         ));
         rows.push(Line::from(header_spans));
 
         for (oi, opt) in q.options.iter().enumerate() {
             let selected = q.selected.contains(&oi);
             let marker = if q.multi_select {
-                if selected { "[x]" } else { "[ ]" }
+                if selected {
+                    "[x]"
+                } else {
+                    "[ ]"
+                }
             } else if selected {
                 "(*)"
             } else {
@@ -469,7 +512,9 @@ fn render_ask_user_question(frame: &mut Frame<'_>, area: Rect, m: &AskUserQuesti
 
     rows.push(Line::raw(""));
     let submit_style = if m.all_answered() {
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
