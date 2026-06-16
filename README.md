@@ -1,9 +1,17 @@
-# Codeoid UI
+# codeoid-ui
 
-Native terminal cockpit for the [Codeoid](../codeoid) daemon, written in Rust + [Ratatui](https://ratatui.rs).
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584.svg?logo=rust)](https://www.rust-lang.org)
+[![UI: Ratatui](https://img.shields.io/badge/TUI-Ratatui-success.svg)](https://ratatui.rs)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-Replaces the Ink/React `codeoid tui` client. The daemon is untouched — this is
-a drop-in WebSocket client that speaks the same wire protocol.
+Native terminal cockpit for the [**Codeoid**](https://github.com/saucam/codeoid)
+daemon — written in Rust + [Ratatui](https://ratatui.rs). Ships the `codeoid-tui`
+binary.
+
+It's a drop-in WebSocket client for the daemon (which is untouched), speaking the
+same wire protocol as the web and Telegram frontends — and the recommended
+terminal client over the built-in Ink/React `codeoid tui` it replaces.
 
 ## Why
 
@@ -108,16 +116,20 @@ cargo test -p codeoid-tui state::       # reducer tests (no Tokio, no Ratatui)
 | Key                    | Action                              |
 |------------------------|-------------------------------------|
 | `Tab` / `i`            | Focus prompt                        |
-| `Esc`                  | Blur prompt                         |
+| `Esc`                  | **Interrupt the running turn** (Claude Code parity); when idle, blur the prompt / close a modal |
+| `Ctrl+X` / `.`         | Interrupt — unconditional aliases   |
 | `Enter`                | Send prompt                         |
 | `Shift+Enter` / `Ctrl+J` | Newline in prompt                 |
 | `←` / `→`, `p` / `n`   | Prev / next session                 |
 | `y` / `d`              | Approve / deny pending tool         |
-| `Ctrl+X` / `.`         | Interrupt the current session       |
 | `m`                    | Cycle execution mode                |
 | `PgUp` / `PgDn`        | Scroll transcript                   |
 | `?`                    | Toggle keybinding help              |
 | `q` / `Ctrl+C`         | Quit                                |
+
+> **Interrupt is keep-warm.** It stops the in-flight turn (reaping the running
+> tool) but the daemon keeps the session alive, so your next message continues
+> on the same context — no reconnect, no lost history.
 
 ## Protocol versioning
 
@@ -126,3 +138,19 @@ This client bakes in `PROTOCOL_VERSION = 1`. On connect, the daemon's
 modal but doesn't refuse to run — the daemon's wire protocol is
 additive-safe. Bump [`crates/codeoid-protocol/src/lib.rs`](crates/codeoid-protocol/src/lib.rs)
 and the daemon in lockstep on any breaking change.
+
+## Contributing & security
+
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). For vulnerabilities, see
+[SECURITY.md](SECURITY.md) (please don't open public issues for security).
+
+## License
+
+[MIT](LICENSE) © Codeoid
+
+---
+
+The daemon, web UI, and Telegram frontend live in
+[saucam/codeoid](https://github.com/saucam/codeoid). Powered by
+[ZeroID](https://github.com/highflame-ai/zeroid) + the
+[Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript).
