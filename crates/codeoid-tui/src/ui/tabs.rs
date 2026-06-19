@@ -78,7 +78,7 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             };
             let mode_tag = match s.mode.unwrap_or(SessionMode::Interactive) {
                 SessionMode::Interactive => "",
-                SessionMode::AutoAllow => " ·auto",
+                SessionMode::Guarded => " ·guarded",
                 SessionMode::Autonomous => " ·autonomous",
             };
             Line::from(vec![

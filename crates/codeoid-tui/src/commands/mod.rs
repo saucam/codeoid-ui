@@ -30,7 +30,7 @@ pub enum SlashCommand {
     Approve,
     /// `/deny` — deny the latest pending tool request.
     Deny,
-    /// `/mode <interactive|auto-allow|autonomous>` — switch execution mode.
+    /// `/mode <guarded|interactive|autonomous>` — switch execution mode.
     SetMode(SessionMode),
     /// `/model [value]` — with an argument, switch the focused session's
     /// model; with none, list the available models. The value is validated
@@ -80,10 +80,10 @@ pub enum ParseError {
     #[error("/rename requires a new name: /rename <new-name>")]
     RenameMissingName,
 
-    #[error("/mode requires one of: interactive, auto-allow, autonomous")]
+    #[error("/mode requires one of: guarded, interactive, autonomous")]
     ModeMissingArg,
 
-    #[error("/mode: '{0}' is not a valid mode — use interactive, auto-allow, or autonomous")]
+    #[error("/mode: '{0}' is not a valid mode — use guarded, interactive, or autonomous")]
     ModeInvalid(String),
 
     #[error("/import requires: /import <bundle.json> <target-workdir>")]
@@ -184,7 +184,7 @@ pub fn parse(text: &str) -> Result<Option<SlashCommand>, ParseError> {
                 .ok_or(ParseError::ModeMissingArg)?;
             let mode = match arg {
                 "interactive" | "i" => SessionMode::Interactive,
-                "auto-allow" | "auto" | "a" => SessionMode::AutoAllow,
+                "guarded" | "g" | "auto-allow" | "auto" | "a" => SessionMode::Guarded,
                 "autonomous" | "auto-pilot" | "pilot" => SessionMode::Autonomous,
                 other => return Err(ParseError::ModeInvalid(other.to_string())),
             };
@@ -205,7 +205,7 @@ pub const CATALOG: &[(&str, &str)] = &[
     ("/interrupt", "stop the running agent"),
     ("/approve", "approve the pending tool"),
     ("/deny", "deny the pending tool"),
-    ("/mode <mode>", "interactive | auto | autonomous"),
+    ("/mode <mode>", "guarded | interactive | autonomous"),
     (
         "/model [value]",
         "list models, or switch the focused session",
@@ -347,7 +347,7 @@ mod tests {
         );
         assert_eq!(
             parse("/mode auto"),
-            Ok(Some(SlashCommand::SetMode(SessionMode::AutoAllow)))
+            Ok(Some(SlashCommand::SetMode(SessionMode::Guarded)))
         );
         assert_eq!(
             parse("/mode autonomous"),

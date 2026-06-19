@@ -201,7 +201,7 @@ fn is_animating(m: &SessionMessage) -> bool {
 fn session_title(session: &SessionInfo) -> Line<'static> {
     let mode = session.mode.map_or("interactive", |m| match m {
         codeoid_protocol::SessionMode::Interactive => "interactive",
-        codeoid_protocol::SessionMode::AutoAllow => "auto-allow",
+        codeoid_protocol::SessionMode::Guarded => "guarded",
         codeoid_protocol::SessionMode::Autonomous => "autonomous",
     });
     Line::from(vec![

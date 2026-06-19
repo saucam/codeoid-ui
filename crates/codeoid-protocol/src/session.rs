@@ -14,14 +14,18 @@ pub enum SessionStatus {
 
 /// Execution mode — controls tool approval and autonomous budgeting.
 ///
-/// * `Interactive` (default) — every tool call asks for approval.
-/// * `AutoAllow` — Read/Grep/Glob/memory/recall are auto-approved; Write/Edit/Bash still ask.
+/// * `Guarded` (daemon default) — Read/Grep/Glob/memory are auto-approved;
+///   Write/Edit/Bash/Agent still ask. (≈ Claude Code's default mode.)
+/// * `Interactive` — every tool call asks for approval, including reads.
 /// * `Autonomous` — every tool auto-approved until the turn budget is exhausted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionMode {
     Interactive,
-    AutoAllow,
+    /// Serializes as `"guarded"`. `auto-allow` accepted as a backward-compat
+    /// alias on the wire (the mode was renamed from `auto-allow`).
+    #[serde(alias = "auto-allow")]
+    Guarded,
     Autonomous,
 }
 
