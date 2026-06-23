@@ -140,18 +140,28 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             ]));
         }
 
-        // Use Paragraph's own line_count so we never disagree with the
-        // widget that actually lays out the content — a hand-rolled row
-        // counter that under-reports by even one row clips the bottom
-        // of the transcript at scroll_offset = 0.
-        let total = Paragraph::new(lines.clone())
-            .wrap(Wrap { trim: false })
-            .line_count(inner_width);
+        // Per-logical-line wrapped-row prefix sum. We use Paragraph's own
+        // line_count per line (ratatui wraps each Line independently, so
+        // the per-line counts sum to the whole-buffer count) — this keeps
+        // the scroll math byte-for-byte consistent with how the windowed
+        // slice is laid out on render, and never under-reports the bottom
+        // row. Built once per cache miss; the render path below never
+        // walks the whole buffer again.
+        let mut row_offsets: Vec<usize> = Vec::with_capacity(lines.len() + 1);
+        let mut acc = 0usize;
+        row_offsets.push(0);
+        for line in &lines {
+            acc += Paragraph::new(vec![line.clone()])
+                .wrap(Wrap { trim: false })
+                .line_count(inner_width);
+            row_offsets.push(acc);
+        }
         scrollback_build.session_id = Some(session_id.clone());
         scrollback_build.width = inner_width;
         scrollback_build.epoch = epoch;
         scrollback_build.lines = lines;
-        scrollback_build.total_rendered_rows = total;
+        scrollback_build.total_rendered_rows = acc;
+        scrollback_build.row_offsets = row_offsets;
     }
 
     // Scroll math reuses the precomputed total. While the user is
@@ -164,18 +174,22 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     state.note_total_rendered(total_rendered);
 
     let max_y = total_rendered.saturating_sub(viewport_rows);
-    let y = max_y
-        .saturating_sub(state.scroll_offset as usize)
-        .min(u16::MAX as usize) as u16;
+    let y = max_y.saturating_sub(state.scroll_offset as usize);
 
-    // Paragraph::new requires `Vec<Line>` by value, so we clone the
-    // outer Vec from the cache. The Tier 2 / custom-widget path
-    // eliminates this clone entirely, but it's already an order of
-    // magnitude cheaper than re-running the per-message renderer.
-    let lines = state.scrollback_build.lines.clone();
-    let paragraph = Paragraph::new(lines)
+    // Hand ratatui only the logical lines that intersect the viewport,
+    // not the whole transcript. This is what keeps scrolling O(viewport):
+    // a 10k-line session re-wraps ~viewport rows per frame instead of all
+    // 10k. `y` is the top visible wrapped row; the slice + intra-line
+    // scroll offset reproduce exactly that window.
+    let (first, intra, last) = crate::state::scrollback_build::visible_window(
+        &state.scrollback_build.row_offsets,
+        y,
+        viewport_rows,
+    );
+    let window: Vec<Line<'static>> = state.scrollback_build.lines[first..last].to_vec();
+    let paragraph = Paragraph::new(window)
         .wrap(Wrap { trim: false })
-        .scroll((y, 0))
+        .scroll((intra.min(u16::MAX as usize) as u16, 0))
         .block(
             Block::default()
                 .borders(Borders::ALL)
