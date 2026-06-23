@@ -1,0 +1,31 @@
+# release-plz configuration — https://release-plz.dev/docs/config
+#
+# release-plz owns version management for this multi-crate workspace:
+#   - bumps every crate's version in lockstep (Conventional-Commit driven) AND
+#     rewrites the internal `version = "x.y.z"` dependency pins to match, so the
+#     three-places-to-edit drift problem can't happen
+#   - maintains a CHANGELOG per crate
+#   - publishes to crates.io in dependency order
+#   - tags + creates a GitHub Release
+#
+# All three crates share one workspace version and ship together, so only the
+# binary crate carries the git tag / GitHub Release; the two libraries are
+# published but untagged (their last-released version is read from crates.io).
+
+[workspace]
+changelog_update = true
+git_release_enable = true
+
+[[package]]
+name = "codeoid-protocol"
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+name = "codeoid-client"
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+name = "codeoid-tui"
+git_tag_name = "v{{ version }}"
