@@ -135,27 +135,9 @@ fn build_line(state: &AppState) -> Option<Line<'static>> {
         return Some(l);
     }
 
-    // Waiting on approval — static.
-    if msgs.iter().any(|m| {
-        m.tool
-            .as_ref()
-            .is_some_and(|t| matches!(&t.state, ToolState::WaitingConfirmation { .. }))
-    }) {
-        return Some(Line::from(vec![
-            Span::styled(
-                "  ⚠ ",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "waiting on your approval — press [y] accept or [d] deny",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-    }
+    // Pending approval is now carried by the dedicated high-visibility
+    // approval banner (see `ui::approval`), so the worker row no longer
+    // duplicates it.
 
     // Session-level signal: daemon tells us it's working. Trusted.
     if matches!(session.status, SessionStatus::Working) {

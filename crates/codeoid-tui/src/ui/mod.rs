@@ -8,6 +8,7 @@
 //!   4. Prompt editor                    (5 rows)
 //!   5. Keybinding hints                 (1 row)
 
+mod approval;
 mod hints;
 mod modal;
 mod prompt;
@@ -23,22 +24,41 @@ use crate::state::AppState;
 pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
     let area = frame.area();
 
+    // A high-visibility approval banner is inserted between the transcript
+    // and the worker row, but only while the focused session has a tool
+    // awaiting confirmation. Otherwise the layout is exactly as before.
+    let show_approval = approval::is_pending(state);
+
+    let mut constraints = vec![
+        Constraint::Length(3), // tabs
+        Constraint::Min(5),    // transcript
+    ];
+    if show_approval {
+        constraints.push(Constraint::Length(approval::HEIGHT)); // approval banner
+    }
+    constraints.push(Constraint::Length(1)); // worker / scroll indicator
+    constraints.push(Constraint::Length(5)); // prompt
+    constraints.push(Constraint::Length(1)); // hints
+
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // 1. tabs
-            Constraint::Min(5),    // 2. transcript
-            Constraint::Length(1), // 3. worker / scroll indicator
-            Constraint::Length(5), // 4. prompt
-            Constraint::Length(1), // 5. hints
-        ])
+        .constraints(constraints)
         .split(area);
 
-    tabs::render(frame, rows[0], state);
-    scrollback::render(frame, rows[1], state);
-    worker::render(frame, rows[2], state);
-    prompt::render(frame, rows[3], state);
-    hints::render(frame, rows[4], state);
+    let mut i = 0;
+    tabs::render(frame, rows[i], state);
+    i += 1;
+    scrollback::render(frame, rows[i], state);
+    i += 1;
+    if show_approval {
+        approval::render(frame, rows[i], state);
+        i += 1;
+    }
+    worker::render(frame, rows[i], state);
+    i += 1;
+    prompt::render(frame, rows[i], state);
+    i += 1;
+    hints::render(frame, rows[i], state);
 
     modal::render(frame, state);
 }
