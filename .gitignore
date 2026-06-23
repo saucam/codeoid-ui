@@ -5,3 +5,6 @@ Cargo.lock.user
 .env
 .env.local
 *.log
+
+# coverage artifact
+/lcov.info

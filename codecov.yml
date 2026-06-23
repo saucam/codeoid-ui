@@ -1,0 +1,26 @@
+# Codecov configuration — https://docs.codecov.com/docs/codecovyml-reference
+# Coverage comes from cargo-llvm-cov (lcov.info); test results from the
+# cargo-nextest `ci` JUnit report — both uploaded by the build-test CI job.
+
+coverage:
+  status:
+    # Whole-project coverage: reported but NOT blocking until a baseline lands.
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+    # Patch = coverage of the lines this PR changed. THIS is the gate.
+    patch:
+      default:
+        target: 80%
+        threshold: 0%
+
+comment:
+  layout: "condensed_header, diff, flags, components, files"
+  behavior: default
+  require_changes: false
+
+ignore:
+  - "target"
+  - "**/tests/**"
