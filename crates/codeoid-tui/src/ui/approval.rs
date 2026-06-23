@@ -50,10 +50,15 @@ pub fn is_pending(state: &AppState) -> bool {
 }
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let Some((tool, description)) = pending(state) else {
-        return;
-    };
+    if let Some((tool, description)) = pending(state) {
+        render_banner(frame, area, &tool, &description);
+    }
+}
 
+/// Draw the banner for a known pending tool. Split out from [`render`] so it
+/// can be exercised against a `TestBackend` without standing up an
+/// [`AppState`].
+fn render_banner(frame: &mut Frame<'_>, area: Rect, tool: &str, description: &str) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
@@ -71,12 +76,12 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let action = Line::from(vec![
         Span::raw(" "),
         Span::styled(
-            tool,
+            tool.to_string(),
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
-            truncate(&description, inner.width.saturating_sub(2) as usize),
+            truncate(description, inner.width.saturating_sub(2) as usize),
             Style::default().fg(Color::White),
         ),
     ]);
@@ -213,5 +218,32 @@ mod tests {
         assert_eq!(truncate("hello world", 5), "hell…");
         assert_eq!(truncate("hi", 5), "hi");
         assert_eq!(truncate("anything", 0), "");
+    }
+
+    #[test]
+    fn banner_renders_title_action_and_keys() {
+        use ratatui::backend::TestBackend;
+        use ratatui::buffer::Cell;
+        use ratatui::Terminal;
+
+        let mut terminal = Terminal::new(TestBackend::new(60, super::HEIGHT)).unwrap();
+        terminal
+            .draw(|f| super::render_banner(f, f.area(), "Edit", "edit src/main.rs"))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(Cell::symbol)
+            .collect();
+
+        assert!(text.contains("APPROVAL NEEDED"), "title missing in: {text}");
+        assert!(text.contains("Edit"), "tool name missing");
+        assert!(text.contains("edit src/main.rs"), "description missing");
+        assert!(
+            text.contains("approve") && text.contains("deny"),
+            "key prompts missing"
+        );
     }
 }
