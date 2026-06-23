@@ -447,3 +447,131 @@ fn short_sub(sub: &str) -> String {
     // spiffe://…/agent/<name> → <name>, else tail path segment.
     sub.rsplit('/').next().unwrap_or(sub).to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codeoid_protocol::{AuthOkMsg, IdentityType, MessageIdentity, SessionStatus};
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Cell;
+    use ratatui::Terminal;
+
+    fn mk_state() -> AppState {
+        AppState::new(AuthOkMsg {
+            identity: MessageIdentity {
+                sub: "spiffe://x".into(),
+                name: Some("Me".into()),
+                kind: IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+        })
+    }
+
+    fn mk_session(id: &str) -> SessionInfo {
+        SessionInfo {
+            id: id.into(),
+            name: "demo".into(),
+            workdir: "/tmp".into(),
+            status: SessionStatus::Idle,
+            created_by: "u".into(),
+            created_at: "2026-06-23T00:00:00Z".into(),
+            attached_clients: 0,
+            mode: None,
+            turns_remaining: None,
+            pinned_files: None,
+            agent_uri: None,
+            subagents: None,
+            usage: None,
+            rotation: None,
+            queued_messages: None,
+            model: None,
+            fallback_model: None,
+        }
+    }
+
+    fn user_msg(sid: &str, id: &str, content: &str) -> SessionMessage {
+        SessionMessage {
+            session_id: sid.into(),
+            message_id: id.into(),
+            role: MessageRole::User,
+            content: content.into(),
+            parts: None,
+            identity: MessageIdentity {
+                sub: "spiffe://x/agent/t".into(),
+                name: None,
+                kind: IdentityType::Agent,
+            },
+            tool: None,
+            metadata: None,
+            timestamp: "2026-06-23T00:00:00Z".into(),
+        }
+    }
+
+    fn buf_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(Cell::symbol)
+            .collect()
+    }
+
+    #[test]
+    fn builds_prefix_sum_and_shows_latest_at_bottom() {
+        let mut state = mk_state();
+        state.sessions.upsert(mk_session("s1")); // auto-focuses
+        for i in 0..5 {
+            state.messages.apply_message(user_msg(
+                "s1",
+                &format!("m{i}"),
+                &format!("hello message {i}"),
+            ));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
+        terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
+
+        // The cache miss built the prefix sum; its last entry is the total.
+        let off = &state.scrollback_build.row_offsets;
+        assert!(off.len() >= 2, "prefix sum not built");
+        assert_eq!(
+            *off.last().unwrap(),
+            state.scrollback_build.total_rendered_rows
+        );
+
+        // Following the bottom → the most recent message is on screen.
+        assert!(
+            buf_text(&terminal).contains("hello message 4"),
+            "latest message should be visible"
+        );
+    }
+
+    #[test]
+    fn windowed_render_follows_scroll_offset() {
+        let mut state = mk_state();
+        state.sessions.upsert(mk_session("s1"));
+        for i in 0..40 {
+            state
+                .messages
+                .apply_message(user_msg("s1", &format!("m{i}"), &format!("LINE{i:02}")));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        // First render populates total + row_offsets at the bottom.
+        terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
+        // Scroll to the very top; the window must now show the earliest lines
+        // and not the latest — i.e. the slice tracked the offset.
+        state.scroll_offset = u16::MAX;
+        terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
+
+        let text = buf_text(&terminal);
+        assert!(
+            text.contains("LINE00"),
+            "top of transcript should be visible when scrolled up: {text}"
+        );
+        assert!(
+            !text.contains("LINE39"),
+            "the latest line must be off-screen when scrolled to the top"
+        );
+    }
+}
