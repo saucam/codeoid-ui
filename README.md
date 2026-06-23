@@ -1,9 +1,12 @@
 # codeoid-ui
 
+[![crates.io](https://img.shields.io/crates/v/codeoid-tui?logo=rust&label=crates.io&color=dea584)](https://crates.io/crates/codeoid-tui)
+[![downloads](https://img.shields.io/crates/d/codeoid-tui?logo=rust&label=downloads&color=dea584)](https://crates.io/crates/codeoid-tui)
+[![docs.rs](https://img.shields.io/docsrs/codeoid-protocol?logo=docs.rs&label=docs.rs)](https://docs.rs/codeoid-protocol)
+[![CI](https://github.com/saucam/codeoid-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/saucam/codeoid-ui/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/saucam/codeoid-ui/branch/main/graph/badge.svg)](https://codecov.io/gh/saucam/codeoid-ui)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584.svg?logo=rust)](https://www.rust-lang.org)
 [![UI: Ratatui](https://img.shields.io/badge/TUI-Ratatui-success.svg)](https://ratatui.rs)
-[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 Native terminal cockpit for the [**Codeoid**](https://github.com/saucam/codeoid)
 daemon — written in Rust + [Ratatui](https://ratatui.rs). Ships the `codeoid-tui`
