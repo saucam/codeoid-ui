@@ -1,0 +1,5 @@
+# nextest config — https://nexte.st/docs/configuration/
+# The `ci` profile emits a JUnit report (target/nextest/ci/junit.xml) that the
+# CI job uploads to Codecov Test Analytics.
+[profile.ci.junit]
+path = "junit.xml"

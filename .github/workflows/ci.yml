@@ -24,7 +24,12 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Install coverage tools (cargo-llvm-cov, cargo-nextest)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -40,5 +45,25 @@ jobs:
       - name: Build
         run: cargo build --all-targets --locked
 
-      - name: Test
-        run: cargo test --all --locked
+      # cargo-llvm-cov wraps nextest, so one instrumented run yields both the
+      # lcov coverage report and (via the `ci` nextest profile) a JUnit report
+      # at target/nextest/ci/junit.xml.
+      - name: Test + coverage
+        run: cargo llvm-cov nextest --workspace --locked --profile ci --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          flags: tui
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          files: target/nextest/ci/junit.xml
+          flags: tui
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
