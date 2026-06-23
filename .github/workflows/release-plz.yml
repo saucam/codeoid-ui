@@ -1,0 +1,52 @@
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Publishes any unreleased crate versions to crates.io (dependency order),
+  # then creates the git tag + GitHub Release for the binary crate.
+  release-plz-release:
+    name: release-plz release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          # A PAT (or the release-plz GitHub App) is required so the pushed
+          # tag triggers release.yml's binary build — tags pushed with the
+          # default GITHUB_TOKEN do NOT trigger other workflows.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || github.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Opens / updates the "release PR": bumps versions + internal pins +
+  # CHANGELOG based on the Conventional Commits since the last release.
+  release-plz-pr:
+    name: release-plz PR
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-plz-pr
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || github.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -1,43 +1,21 @@
 name: Release
 
+# Cross-platform `codeoid-tui` binaries, attached to the GitHub Release that
+# release-plz creates for each `v*` tag. Crate publishing, version management,
+# tagging, and the release notes are handled by release-plz
+# (.github/workflows/release-plz.yml) — this workflow only builds + uploads the
+# prebuilt binaries.
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write # create the GitHub Release + upload assets
+  contents: write # upload assets to the release
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  crates:
-    name: Publish to crates.io
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Verify workspace version matches the tag
-        run: |
-          VER="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-          TAG="${GITHUB_REF_NAME#v}"
-          if [ "$VER" != "$TAG" ]; then
-            echo "::error::workspace version ($VER) does not match tag ($TAG)"
-            exit 1
-          fi
-
-      # Dependency order; modern cargo waits for each crate to index before returning.
-      - name: Publish crates
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          cargo publish -p codeoid-protocol
-          cargo publish -p codeoid-client
-          cargo publish -p codeoid-tui
-
   binaries:
     name: Binary (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
@@ -72,8 +50,10 @@ jobs:
           tar -czf "${DIR}.tar.gz" "$DIR"
           echo "ASSET=${DIR}.tar.gz" >> "$GITHUB_ENV"
 
+      # release-plz already created the release with changelog notes — just
+      # attach the binary, don't regenerate the body.
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ASSET }}
-          generate_release_notes: true
+          generate_release_notes: false
