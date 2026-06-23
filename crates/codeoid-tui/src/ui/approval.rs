@@ -72,7 +72,12 @@ fn render_banner(frame: &mut Frame<'_>, area: Rect, tool: &str, description: &st
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Line 1: the action — tool name + what it wants to do.
+    // Line 1: the action — tool name + what it wants to do. Budget the
+    // description against the room left after the " <tool>  " prefix so the
+    // banner never overflows into a wrapped second row. Tool names are ASCII
+    // identifiers, so a char count is the column count.
+    let prefix_cols = 1 + tool.chars().count() + 2; // " " + tool + "  "
+    let desc_max = usize::from(inner.width).saturating_sub(prefix_cols);
     let action = Line::from(vec![
         Span::raw(" "),
         Span::styled(
@@ -81,7 +86,7 @@ fn render_banner(frame: &mut Frame<'_>, area: Rect, tool: &str, description: &st
         ),
         Span::raw("  "),
         Span::styled(
-            truncate(description, inner.width.saturating_sub(2) as usize),
+            truncate(description, desc_max),
             Style::default().fg(Color::White),
         ),
     ]);
