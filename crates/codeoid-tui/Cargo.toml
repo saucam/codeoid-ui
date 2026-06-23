@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
 description = "Ratatui-based terminal cockpit for the Codeoid daemon."
 
 [[bin]]

@@ -12,12 +12,14 @@ edition = "2021"
 rust-version = "1.85"
 license = "MIT"
 authors = ["Codeoid <dev@codeoid.ai>"]
-repository = "https://github.com/codeoid/codeoid-ui"
+repository = "https://github.com/saucam/codeoid-ui"
+homepage = "https://github.com/saucam/codeoid-ui"
+keywords = ["codeoid", "claude", "tui", "ai-agents", "ratatui"]
 
 [workspace.dependencies]
 # Workspace-internal
-codeoid-protocol = { path = "crates/codeoid-protocol" }
-codeoid-client   = { path = "crates/codeoid-client" }
+codeoid-protocol = { path = "crates/codeoid-protocol", version = "0.1.0" }
+codeoid-client   = { path = "crates/codeoid-client", version = "0.1.0" }
 
 # Async runtime
 tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "io-std", "io-util"] }

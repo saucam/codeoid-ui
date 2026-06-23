@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
 description = "Wire protocol types for the Codeoid daemon — serde-compatible Rust port of src/protocol/types.ts."
 
 [dependencies]
