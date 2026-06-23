@@ -246,4 +246,70 @@ mod tests {
             "key prompts missing"
         );
     }
+
+    #[test]
+    fn full_layout_inserts_the_banner_when_a_tool_is_pending() {
+        use crate::state::AppState;
+        use codeoid_protocol::{AuthOkMsg, SessionInfo, SessionStatus};
+        use ratatui::backend::TestBackend;
+        use ratatui::buffer::Cell;
+        use ratatui::Terminal;
+
+        let mut state = AppState::new(AuthOkMsg {
+            identity: MessageIdentity {
+                sub: "spiffe://x".into(),
+                name: Some("Me".into()),
+                kind: IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+        });
+        state.sessions.upsert(SessionInfo {
+            id: "s1".into(),
+            name: "demo".into(),
+            workdir: "/tmp".into(),
+            status: SessionStatus::WaitingApproval,
+            created_by: "u".into(),
+            created_at: "2026-06-23T00:00:00Z".into(),
+            attached_clients: 0,
+            mode: None,
+            turns_remaining: None,
+            pinned_files: None,
+            agent_uri: None,
+            subagents: None,
+            usage: None,
+            rotation: None,
+            queued_messages: None,
+            model: None,
+            fallback_model: None,
+        });
+        let mut m = msg(
+            MessageRole::ToolCall,
+            Some(tool(
+                "Edit",
+                ToolState::WaitingConfirmation {
+                    input: json!({}),
+                    description: "edit src/main.rs".into(),
+                    approval_id: "a1".into(),
+                },
+            )),
+        );
+        m.session_id = "s1".into();
+        state.messages.apply_message(m);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut state)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(Cell::symbol)
+            .collect();
+
+        assert!(
+            text.contains("APPROVAL NEEDED"),
+            "the full layout should insert the approval banner: {text}"
+        );
+    }
 }
