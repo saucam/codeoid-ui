@@ -70,6 +70,23 @@ codeoid-ui/
   protocol-to-`Line` helpers. Easy unit tests for markdown/diff without
   spinning up Ratatui.
 
+## Install
+
+**From crates.io (recommended)** — published as `codeoid-tui`:
+
+```bash
+cargo install codeoid-tui
+```
+
+This drops a `codeoid-tui` binary on your `PATH`. Everywhere below you can run
+`codeoid-tui` directly instead of `cargo run -p codeoid-tui --release`.
+
+**Prebuilt binaries** — each [GitHub Release](https://github.com/saucam/codeoid-ui/releases)
+ships tarballs for Linux (`x86_64`) and macOS (Apple Silicon + Intel); download,
+extract, and drop `codeoid-tui` on your `PATH`.
+
+**From source** — see [Building](#building) below if you want to hack on it.
+
 ## Building
 
 ```bash
@@ -87,10 +104,10 @@ exchanging it with ZeroID for an access token on startup.
 
 ```bash
 # Most users — use the ZeroID API key you already have in your shell.
-cargo run -p codeoid-tui --release
+codeoid-tui                       # installed binary; or: cargo run -p codeoid-tui --release
 
 # Or bring your own JWT (skips the ZeroID exchange).
-CODEOID_TOKEN=eyJ... cargo run -p codeoid-tui --release
+CODEOID_TOKEN=eyJ... codeoid-tui
 ```
 
 Flags:
