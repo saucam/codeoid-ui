@@ -476,7 +476,11 @@ fn count_wrapped_rows(line: &Line<'_>, width: u16) -> usize {
         return 1;
     }
     let cell_width = line.width();
-    if cell_width == 0 { 1 } else { cell_width.div_ceil(w) }
+    if cell_width == 0 {
+        1
+    } else {
+        cell_width.div_ceil(w)
+    }
 }
 
 #[cfg(test)]
