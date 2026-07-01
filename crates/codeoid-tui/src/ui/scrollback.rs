@@ -66,19 +66,28 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     // renderer used unconditionally before.
     let epoch = state.messages.epoch_of_session(&session_id);
 
-    // Animated content (running tool spinners, elapsed-time counters)
-    // must repaint every tick. If any focused-session message is
-    // animating, force a rebuild so the spinner actually advances.
-    let any_animating = state
-        .messages
-        .messages(&session_id)
-        .iter()
-        .any(is_animating);
+    // Structural check is O(1). The O(N) animation scan is only needed
+    // when the structural key already matches — there's no value in
+    // scanning all messages when we already know the session or width
+    // changed. And when `has_animating` is false (idle session), we skip
+    // the scan entirely even on structural hits.
+    let structural_hit = state
+        .scrollback_build
+        .matches(&session_id, inner_width, epoch);
 
-    let cache_hit = !any_animating
-        && state
-            .scrollback_build
-            .matches(&session_id, inner_width, epoch);
+    let cache_hit = structural_hit && {
+        if state.scrollback_build.has_animating {
+            // Spinners were active last build — scan to see if any still run.
+            !state
+                .messages
+                .messages(&session_id)
+                .iter()
+                .any(is_animating)
+        } else {
+            // No animations last build + same epoch → definite cache hit.
+            true
+        }
+    };
 
     if !cache_hit {
         // Rebuild: split-borrow `messages` + `render_cache` +
@@ -102,8 +111,12 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         render_cache.retain_only(&live_ids);
 
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(msgs.len() * 4);
+        let mut any_animating = false;
         for m in msgs {
             let skip_cache = is_animating(m);
+            if skip_cache {
+                any_animating = true;
+            }
             let version = messages.version_of(&m.message_id);
             let per_block_expanded = expanded_ids.contains(&m.message_id);
             let is_selected = selected_id.as_deref() == Some(m.message_id.as_str());
@@ -140,25 +153,23 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             ]));
         }
 
-        // Per-logical-line wrapped-row prefix sum. We use Paragraph's own
-        // line_count per line (ratatui wraps each Line independently, so
-        // the per-line counts sum to the whole-buffer count) — this keeps
-        // the scroll math byte-for-byte consistent with how the windowed
-        // slice is laid out on render, and never under-reports the bottom
-        // row. Built once per cache miss; the render path below never
-        // walks the whole buffer again.
+        // Per-logical-line wrapped-row prefix sum. `count_wrapped_rows`
+        // replaces the old `Paragraph::new(vec![line.clone()]).line_count()`
+        // call — same O(chars) Unicode-width walk but without allocating a
+        // Paragraph widget + running ratatui's layout pass per line. Built
+        // once per cache miss; the render path below never walks the whole
+        // buffer again.
         let mut row_offsets: Vec<usize> = Vec::with_capacity(lines.len() + 1);
         let mut acc = 0usize;
         row_offsets.push(0);
         for line in &lines {
-            acc += Paragraph::new(vec![line.clone()])
-                .wrap(Wrap { trim: false })
-                .line_count(inner_width);
+            acc += count_wrapped_rows(line, inner_width);
             row_offsets.push(acc);
         }
         scrollback_build.session_id = Some(session_id.clone());
         scrollback_build.width = inner_width;
         scrollback_build.epoch = epoch;
+        scrollback_build.has_animating = any_animating;
         scrollback_build.lines = lines;
         scrollback_build.total_rendered_rows = acc;
         scrollback_build.row_offsets = row_offsets;
@@ -446,6 +457,30 @@ fn fmt_timestamp(raw: &str) -> String {
 fn short_sub(sub: &str) -> String {
     // spiffe://…/agent/<name> → <name>, else tail path segment.
     sub.rsplit('/').next().unwrap_or(sub).to_string()
+}
+
+/// Compute the number of terminal rows a single logical line occupies at
+/// `width` columns. Uses ratatui's `Line::width()` (sum of Unicode display
+/// widths across all spans) divided by the viewport width — no Paragraph
+/// allocation or layout pass, so this is cheap to call for every line in
+/// a long transcript.
+///
+/// The result is a slight over-estimate for lines whose longest word
+/// exceeds `width` (word-wrap pushes the word to the next row, leaving
+/// the previous row shorter than `width`). For practical transcript
+/// content this is rare and the error is at most one row per message,
+/// which is acceptable for scroll math.
+fn count_wrapped_rows(line: &Line<'_>, width: u16) -> usize {
+    let w = width as usize;
+    if w == 0 {
+        return 1;
+    }
+    let cell_width = line.width();
+    if cell_width == 0 {
+        1
+    } else {
+        cell_width.div_ceil(w)
+    }
 }
 
 #[cfg(test)]

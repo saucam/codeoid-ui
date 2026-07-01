@@ -37,6 +37,10 @@ pub struct ScrollbackBuild {
     /// frame (and each scroll tick) becomes O(viewport), not O(transcript).
     /// See [`visible_window`].
     pub row_offsets: Vec<usize>,
+    /// Whether any message in the last build had animating content (running
+    /// tool spinners). Stored so the next frame can skip the O(N) scan when
+    /// this is `false` — idle sessions get an O(1) cache check.
+    pub has_animating: bool,
 }
 
 /// Pick the logical-line slice that covers the viewport.
@@ -98,6 +102,7 @@ impl ScrollbackBuild {
         self.lines.clear();
         self.total_rendered_rows = 0;
         self.row_offsets.clear();
+        self.has_animating = false;
     }
 }
 
