@@ -17,8 +17,14 @@
 //!   and start fresh, so `Downloading 10%\r...\rDownloading 100%` ends up
 //!   as `Downloading 100%` rather than all intermediate frames concatenated.
 //! * **`\n`** — flush current line, start a new one.
-//! * **CSI non-SGR** (`ESC[...letter` where letter ≠ `m`) — consumed and dropped.
+//! * **CSI non-SGR** (`ESC[...letter` where letter ≠ `m`) — consumed and
+//!   dropped. The 8-bit C1 form (`U+009B`) is handled identically.
 //! * **OSC** (`ESC]...BEL` or `ESC]...ESC\`) — consumed and dropped.
+//! * **DCS / SOS / PM / APC** (`ESC P` / `ESC X` / `ESC ^` / `ESC _` …
+//!   `ESC \` or BEL) — consumed and dropped, payload included (sixel,
+//!   tmux passthrough).
+//! * **`\t`** — expanded to spaces up to the next 8-column stop
+//!   (ratatui 0.29 renders `\t` as zero-width, destroying alignment).
 //! * **C0 controls** other than `\n` and `\t` — dropped.
 //!
 //! Malformed sequences (unterminated CSI at EOF, unexpected chars) are
@@ -27,6 +33,11 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthChar;
+
+/// Tab stop width for `\t` expansion. Matches the de-facto terminal
+/// default (and `crate::render::wrap::TAB_WIDTH`).
+const TAB_WIDTH: usize = 8;
 
 /// Parse a string containing ANSI SGR codes into styled lines.
 ///
@@ -48,6 +59,10 @@ pub struct AnsiParser {
     buf: String,
     line_spans: Vec<Span<'static>>,
     lines: Vec<Line<'static>>,
+    /// Visual column within the current line (spans + buf), tracked so
+    /// `\t` can expand to the next 8-column stop. Ratatui 0.29 renders
+    /// `\t` as zero-width, so a literal tab would destroy alignment.
+    col: usize,
 }
 
 impl Default for AnsiParser {
@@ -64,6 +79,7 @@ impl AnsiParser {
             buf: String::new(),
             line_spans: Vec::new(),
             lines: Vec::new(),
+            col: 0,
         }
     }
 
@@ -72,14 +88,26 @@ impl AnsiParser {
         while let Some(c) = chars.next() {
             match c {
                 '\x1b' => self.handle_escape(&mut chars),
+                // 8-bit C1 CSI — same grammar as `ESC [`, one intro char.
+                '\u{9b}' => self.handle_csi(&mut chars),
                 '\r' => self.reset_current_line(),
                 '\n' => self.flush_line(),
-                '\t' => self.buf.push('\t'),
+                // Expand to the next 8-column stop. Ratatui 0.29 drops
+                // `\t` as a zero-width grapheme, so a literal tab would
+                // collapse columns instead of aligning them.
+                '\t' => {
+                    let pad = TAB_WIDTH - (self.col % TAB_WIDTH);
+                    self.buf.extend(std::iter::repeat_n(' ', pad));
+                    self.col += pad;
+                }
                 c if c.is_control() => {
                     // BEL, NUL, BS — drop. These either make noise or
                     // move the cursor, neither of which we want.
                 }
-                c => self.buf.push(c),
+                c => {
+                    self.buf.push(c);
+                    self.col += UnicodeWidthChar::width(c).unwrap_or(0);
+                }
             }
         }
     }
@@ -103,6 +131,7 @@ impl AnsiParser {
         self.flush_buf();
         let spans = std::mem::take(&mut self.line_spans);
         self.lines.push(Line::from(spans));
+        self.col = 0;
     }
 
     fn reset_current_line(&mut self) {
@@ -111,6 +140,7 @@ impl AnsiParser {
         // whatever we've built for the current line so far.
         self.buf.clear();
         self.line_spans.clear();
+        self.col = 0;
     }
 
     fn handle_escape(&mut self, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
@@ -120,9 +150,12 @@ impl AnsiParser {
                 chars.next();
                 self.handle_csi(chars);
             }
-            ']' => {
+            ']' | 'P' | 'X' | '^' | '_' => {
+                // OSC / DCS / SOS / PM / APC — string sequences whose
+                // arbitrary payload (sixel, tmux passthrough) must be
+                // swallowed up to ST or BEL, never emitted as text.
                 chars.next();
-                consume_osc(chars);
+                consume_string_sequence(chars);
             }
             _ => {
                 // 2-byte escape (ESC 7, ESC 8, etc.) — consume one and drop.
@@ -208,8 +241,10 @@ impl AnsiParser {
     }
 }
 
-fn consume_osc(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    // OSC terminates on BEL (\x07) or ST (ESC \).
+fn consume_string_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    // OSC/DCS/SOS/PM/APC terminate on ST (ESC \); BEL is accepted too
+    // (strictly OSC-only, but real-world emitters use it liberally and
+    // consuming a little extra beats flooding the transcript).
     while let Some(c) = chars.next() {
         if c == '\x07' {
             return;
@@ -451,9 +486,59 @@ mod tests {
     }
 
     #[test]
-    fn tab_preserved() {
+    fn tab_expands_to_next_eight_col_stop() {
+        // Ratatui 0.29 drops \t as zero-width, so tabs are expanded to
+        // spaces at parse time. "col1" ends at column 4 → pad 4.
         let lines = parse_ansi("col1\tcol2");
-        assert_eq!(first_line_text(&lines), "col1\tcol2");
+        assert_eq!(first_line_text(&lines), "col1    col2");
+    }
+
+    #[test]
+    fn mid_line_tabs_align_to_stops() {
+        // "ab" (2) → pad 6 → col 8; "c" → col 9 → pad 7 → col 16.
+        let lines = parse_ansi("ab\tc\td");
+        assert_eq!(first_line_text(&lines), "ab      c       d");
+    }
+
+    #[test]
+    fn tab_expansion_is_cjk_width_aware() {
+        // "世" occupies 2 columns → tab pads 6 spaces to column 8.
+        let lines = parse_ansi("世\tx");
+        assert_eq!(first_line_text(&lines), "世      x");
+    }
+
+    #[test]
+    fn tab_column_spans_styled_segments() {
+        // The column counter must accumulate across span boundaries:
+        // red "ab" ends at column 2 even though it sits in an earlier
+        // span, so the tab pads 6 spaces.
+        let lines = parse_ansi("\x1b[31mab\x1b[0m\tc");
+        assert_eq!(first_line_text(&lines), "ab      c");
+    }
+
+    #[test]
+    fn tab_column_resets_after_newline_and_cr() {
+        let lines = parse_ansi("ab\ncd\tx");
+        assert_eq!(
+            lines[1]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>(),
+            "cd      x"
+        );
+        // \r discards the line → column restarts at 0.
+        let lines = parse_ansi("junk\rab\tc");
+        assert_eq!(first_line_text(&lines), "ab      c");
+    }
+
+    #[test]
+    fn tab_column_persists_across_streamed_feeds() {
+        let mut parser = AnsiParser::new();
+        parser.feed("ab");
+        parser.feed("\tc");
+        let lines = parser.finalize();
+        assert_eq!(first_line_text(&lines), "ab      c");
     }
 
     #[test]
@@ -464,7 +549,8 @@ mod tests {
                    \t\x1b[31mmodified:   Cargo.toml\x1b[m";
         let lines = parse_ansi(raw);
         assert_eq!(lines.len(), 3);
-        // Third line: "modified:   Cargo.toml" in red.
+        // Third line: leading tab expanded to a full 8-column indent,
+        // then "modified:   Cargo.toml" in red.
         let third = &lines[2];
         let red_span = third
             .spans
@@ -472,6 +558,42 @@ mod tests {
             .find(|s| s.content.contains("modified"))
             .expect("modified span");
         assert_eq!(red_span.style.fg, Some(Color::Red));
+        let text = third
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(
+            text.starts_with("        modified"),
+            "leading tab should expand to 8 spaces: {text:?}"
+        );
+    }
+
+    #[test]
+    fn dcs_sixel_payload_dropped() {
+        let lines = parse_ansi("before\x1bPq#0;2;0;0;0#0~~@@vv@@~~$\x1b\\after");
+        assert_eq!(first_line_text(&lines), "beforeafter");
+    }
+
+    #[test]
+    fn sos_pm_apc_payloads_dropped() {
+        let lines = parse_ansi("1\x1bXsos\x1b\\2\x1b^pm\x1b\\3\x1b_Ga=T,f=100\x1b\\4");
+        assert_eq!(first_line_text(&lines), "1234");
+    }
+
+    #[test]
+    fn unterminated_dcs_consumes_to_eof() {
+        let lines = parse_ansi("safe\x1bPq#0;2;0;0;0#0~~@@");
+        assert_eq!(first_line_text(&lines), "safe");
+    }
+
+    #[test]
+    fn eight_bit_csi_applies_sgr() {
+        // U+009B = single-char CSI; `\u{9b}31m` must behave like ESC[31m
+        // (and its parameter bytes must never leak as text).
+        let lines = parse_ansi("\u{9b}31mred\u{9b}0m");
+        assert_eq!(first_line_text(&lines), "red");
+        assert_eq!(first_line_style(&lines, 0).fg, Some(Color::Red));
     }
 
     #[test]
