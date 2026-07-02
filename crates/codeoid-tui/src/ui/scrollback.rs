@@ -142,6 +142,17 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
             msgs.iter().map(|m| m.message_id.clone()).collect();
         render_cache.retain_session(&session_id, &live_ids);
 
+        // INVARIANT: message ids are unique within a session, so keying
+        // the render cache and BuildSegments by `message_id` alone is
+        // sound. The daemon mints every messageId with randomUUID() and
+        // its ScrollbackBuffer.push upserts by messageId precisely so
+        // scrollback.replay can never carry two entries with the same
+        // id ("the #50 bug class" in codeoid's session.ts). On this
+        // side, MessageStore::apply_message upserts by id and
+        // apply_delta patches in place — neither can introduce a
+        // duplicate either. Newest-wins resolution in both stores keeps
+        // even a hypothetical protocol violation consistent rather than
+        // corrupt.
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(msgs.len() * 4);
         let mut row_counts: Vec<usize> = Vec::with_capacity(msgs.len() * 4);
         let mut segments: Vec<crate::state::scrollback_build::BuildSegment> =

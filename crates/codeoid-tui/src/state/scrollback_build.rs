@@ -216,6 +216,14 @@ impl ScrollbackBuildCache {
         }
     }
 
+    /// Drop ONE session's build. Used when session-local render state
+    /// that the epoch doesn't capture changes (tool-block selection,
+    /// per-block expand) — other sessions' builds stay valid, so
+    /// A→B→A tab flips keep their cache hits.
+    pub fn evict_session(&mut self, session_id: &str) {
+        self.entries.retain(|(id, _)| id != session_id);
+    }
+
     /// Drop every cached build. Used when a global toggle (e.g.
     /// verbose-tool-output) changes how messages render at the same
     /// width + epoch — the keys are technically still correct but every
@@ -429,6 +437,22 @@ mod tests {
         cache.clear();
         assert!(!cache.matches("a", 80, 1));
         assert!(cache.get("a").is_none());
+    }
+
+    #[test]
+    fn evict_session_removes_only_that_session() {
+        let mut cache = ScrollbackBuildCache::default();
+        let _ = cache.insert("a".into(), mk_build(80, 1));
+        let _ = cache.insert("b".into(), mk_build(80, 2));
+        cache.evict_session("a");
+        assert!(cache.get("a").is_none());
+        assert!(
+            cache.matches("b", 80, 2),
+            "other sessions keep their builds"
+        );
+        // Evicting an unknown session is a no-op.
+        cache.evict_session("zzz");
+        assert!(cache.matches("b", 80, 2));
     }
 
     // ============ splice_message ============

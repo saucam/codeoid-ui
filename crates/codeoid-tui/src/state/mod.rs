@@ -218,14 +218,19 @@ impl AppState {
         self.selected_tool_message_id = Some(next.clone());
         // Both the old and new selected blocks render with a different
         // header style, so invalidate per-message caches for them.
-        // `ids` was non-empty, so a focused session id exists.
+        // `ids` was non-empty, so a focused session id exists. Selection
+        // is focused-session-local, so only that session's assembled
+        // build is stale — evicting just it (instead of clearing the
+        // whole LRU) keeps other sessions' A→B→A build hits alive and
+        // preserves the "render-cache sessions ⊆ build-LRU sessions"
+        // memory bound.
         if let Some(sid) = self.sessions.focused_id().map(ToString::to_string) {
             if let Some(old) = prev_selected {
                 self.render_cache.invalidate(&sid, &old);
             }
             self.render_cache.invalidate(&sid, &next);
+            self.scrollback_build.evict_session(&sid);
         }
-        self.scrollback_build.clear();
     }
 
     /// Toggle the per-block expand state for the current selection.
@@ -245,10 +250,13 @@ impl AppState {
             self.expanded_tool_message_ids.insert(id.clone());
         }
         self.selected_tool_message_id = Some(id.clone());
+        // Expand state is focused-session-local (the target id came
+        // from the focused session's tool calls) — evict only that
+        // session's build, same as cycle_tool_block_selection.
         if let Some(sid) = self.sessions.focused_id().map(ToString::to_string) {
             self.render_cache.invalidate(&sid, &id);
+            self.scrollback_build.evict_session(&sid);
         }
-        self.scrollback_build.clear();
     }
 
     /// Drain the prompt into a `String` and reset the editor. Returns
@@ -541,6 +549,55 @@ mod tests {
     use super::*;
     use codeoid_protocol::{IdentityType, MessageIdentity};
 
+    fn mk_session_info(id: &str) -> SessionInfo {
+        SessionInfo {
+            id: id.into(),
+            name: "demo".into(),
+            workdir: "/tmp".into(),
+            status: codeoid_protocol::SessionStatus::Idle,
+            created_by: "u".into(),
+            created_at: "2026-06-23T00:00:00Z".into(),
+            attached_clients: 0,
+            mode: None,
+            turns_remaining: None,
+            pinned_files: None,
+            agent_uri: None,
+            subagents: None,
+            usage: None,
+            rotation: None,
+            queued_messages: None,
+            model: None,
+            fallback_model: None,
+        }
+    }
+
+    fn tool_call_msg(sid: &str, mid: &str) -> codeoid_protocol::SessionMessage {
+        codeoid_protocol::SessionMessage {
+            session_id: sid.into(),
+            message_id: mid.into(),
+            role: codeoid_protocol::MessageRole::ToolCall,
+            content: String::new(),
+            parts: None,
+            identity: MessageIdentity {
+                sub: "spiffe://x/agent/t".into(),
+                name: None,
+                kind: IdentityType::Agent,
+            },
+            tool: Some(codeoid_protocol::ToolInfo {
+                tool_id: "t1".into(),
+                name: "Bash".into(),
+                state: codeoid_protocol::ToolState::Completed {
+                    success: true,
+                    output: None,
+                    elapsed_ms: Some(1),
+                    confirmed_by: None,
+                },
+            }),
+            metadata: None,
+            timestamp: "2026-06-23T00:00:00Z".into(),
+        }
+    }
+
     fn mk_state() -> AppState {
         AppState::new(AuthOkMsg {
             identity: MessageIdentity {
@@ -616,6 +673,55 @@ mod tests {
             "second call should return false"
         );
         assert!(state.note_attached("s2"));
+    }
+
+    #[test]
+    fn tool_selection_evicts_only_the_focused_sessions_build() {
+        let mut state = mk_state();
+        state.sessions.upsert(mk_session_info("s1")); // auto-focuses s1
+        state.sessions.upsert(mk_session_info("s2"));
+        state.messages.apply_message(tool_call_msg("s1", "t-a"));
+        // Seed cached builds for both sessions.
+        let _ = state
+            .scrollback_build
+            .insert("s1".into(), scrollback_build::ScrollbackBuild::default());
+        let _ = state
+            .scrollback_build
+            .insert("s2".into(), scrollback_build::ScrollbackBuild::default());
+
+        state.cycle_tool_block_selection(true);
+
+        assert!(
+            state.scrollback_build.get("s1").is_none(),
+            "focused session's build is stale after selection change"
+        );
+        assert!(
+            state.scrollback_build.get("s2").is_some(),
+            "selection is session-local — other sessions keep their builds"
+        );
+    }
+
+    #[test]
+    fn tool_expand_evicts_only_the_focused_sessions_build() {
+        let mut state = mk_state();
+        state.sessions.upsert(mk_session_info("s1"));
+        state.sessions.upsert(mk_session_info("s2"));
+        state.messages.apply_message(tool_call_msg("s1", "t-a"));
+        let _ = state
+            .scrollback_build
+            .insert("s1".into(), scrollback_build::ScrollbackBuild::default());
+        let _ = state
+            .scrollback_build
+            .insert("s2".into(), scrollback_build::ScrollbackBuild::default());
+
+        state.toggle_expand_selected_tool_block();
+
+        assert!(state.expanded_tool_message_ids.contains("t-a"));
+        assert!(state.scrollback_build.get("s1").is_none());
+        assert!(
+            state.scrollback_build.get("s2").is_some(),
+            "expand is session-local — other sessions keep their builds"
+        );
     }
 
     #[test]
