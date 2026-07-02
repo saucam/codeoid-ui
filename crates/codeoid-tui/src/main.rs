@@ -16,6 +16,7 @@ mod state;
 mod ui;
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -94,10 +95,69 @@ async fn main() -> Result<()> {
         .context("failed to resolve auth token")?;
 
     let mouse = !cli.no_mouse;
+
+    // A panic anywhere (renderer, reducer, a dependency) must not strand
+    // the user's terminal in raw mode + alternate screen + mouse capture
+    // — that leaves the shell unusable and hides the panic message on
+    // the alternate screen. Restore FIRST, then let the default hook
+    // print the message to the primary screen.
+    install_panic_hook();
+
+    // RAII guard: restores the terminal on drop, covering `?`-style
+    // early returns from here on (including a setup_terminal that fails
+    // partway through enabling modes).
+    let _guard = TerminalGuard;
     let mut terminal = setup_terminal(mouse)?;
     let res = App::new(daemon_url, token).run(&mut terminal).await;
-    restore_terminal(&mut terminal, mouse)?;
+    restore_terminal(&mut terminal)?;
     res
+}
+
+/// Set when `setup_terminal` starts mutating terminal modes, cleared
+/// once the terminal has been restored. Keeps the restore idempotent so
+/// the panic hook, the RAII guard, and the normal exit path can all
+/// call it without stacking duplicate escape sequences.
+static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Best-effort terminal restore, safe to call from any context
+/// (including a panic hook). No-ops unless `setup_terminal` started and
+/// the terminal hasn't been restored yet. Always emits the full disable
+/// set — disabling a mode that was never enabled is harmless, and the
+/// panic hook can't know whether mouse capture was on.
+fn restore_terminal_now() {
+    if !TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
+}
+
+/// Chain a terminal-restoring hook in front of the default panic hook,
+/// so the default hook's message + backtrace land on a usable primary
+/// screen instead of vanishing with the alternate screen.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal_now();
+        default_hook(info);
+    }));
+}
+
+/// RAII companion to the panic hook: restores the terminal when dropped
+/// (early return, `?`, or normal fall-through). Idempotent with the
+/// explicit `restore_terminal` call via [`TERMINAL_ACTIVE`].
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal_now();
+    }
 }
 
 fn init_tracing(log_file: Option<&std::path::Path>) -> Result<()> {
@@ -131,6 +191,11 @@ fn init_tracing(log_file: Option<&std::path::Path>) -> Result<()> {
 }
 
 fn setup_terminal(mouse: bool) -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+    // Arm the restore BEFORE touching any terminal mode, so a failure
+    // partway through (raw mode on, alternate screen not yet entered,
+    // etc.) still gets unwound by the guard / panic hook. Restoring
+    // modes that were never enabled is harmless.
+    TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     // Bracketed paste tells the terminal to wrap pasted text in escape
@@ -158,25 +223,8 @@ fn setup_terminal(mouse: bool) -> Result<Terminal<CrosstermBackend<io::Stdout>>>
     Ok(terminal)
 }
 
-fn restore_terminal(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    mouse: bool,
-) -> Result<()> {
-    disable_raw_mode()?;
-    if mouse {
-        execute!(
-            terminal.backend_mut(),
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            LeaveAlternateScreen
-        )?;
-    } else {
-        execute!(
-            terminal.backend_mut(),
-            DisableBracketedPaste,
-            LeaveAlternateScreen
-        )?;
-    }
+fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    restore_terminal_now();
     terminal.show_cursor()?;
     Ok(())
 }
