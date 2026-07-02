@@ -14,8 +14,18 @@ use tracing::debug;
 /// * If a message with the same `message_id` already exists in the buffer,
 ///   replace it (daemon re-broadcast or scrollback hit).
 /// * Otherwise append.
+///
+/// Searches back-to-front: re-broadcasts and streaming updates target
+/// the NEWEST message, so a front-to-back scan is the worst case on
+/// long transcripts (O(N) per event, felt as prompt lag after many
+/// turns). Should duplicate ids ever appear (daemon bug), the newest
+/// occurrence wins — consistent with [`MessageStore::apply_delta`].
 fn upsert(buf: &mut Vec<SessionMessage>, m: SessionMessage) {
-    if let Some(slot) = buf.iter_mut().find(|sm| sm.message_id == m.message_id) {
+    if let Some(slot) = buf
+        .iter_mut()
+        .rev()
+        .find(|sm| sm.message_id == m.message_id)
+    {
         *slot = m;
     } else {
         buf.push(m);
@@ -93,7 +103,14 @@ impl MessageStore {
             );
             return;
         };
-        let Some(target) = buf.iter_mut().find(|m| m.message_id == delta.message_id) else {
+        // Deltas stream into the newest message — search from the back
+        // so the common case is O(1) instead of a scan over the whole
+        // transcript on every streamed chunk.
+        let Some(target) = buf
+            .iter_mut()
+            .rev()
+            .find(|m| m.message_id == delta.message_id)
+        else {
             debug!(
                 session_id = %delta.session_id,
                 message_id = %delta.message_id,
@@ -361,6 +378,66 @@ mod tests {
         store.apply_delta(d);
 
         assert!(store.messages("s1")[0].tool.is_none());
+    }
+
+    #[test]
+    fn apply_delta_targets_newest_when_duplicate_ids_exist() {
+        // Duplicate message ids can't be produced through upsert, but a
+        // buggy daemon replay could inject them via replace_scrollback.
+        // The back-to-front lookup must patch the NEWEST occurrence and
+        // leave the older duplicate untouched.
+        let mut store = MessageStore::default();
+        let mut old_dup = mk_msg("s1", "dup");
+        old_dup.content = "old".into();
+        let mut new_dup = mk_msg("s1", "dup");
+        new_dup.content = "new".into();
+        store.replace_scrollback("s1".into(), vec![old_dup, mk_msg("s1", "mid"), new_dup]);
+
+        let mut d = mk_delta("s1", "dup");
+        d.content_append = Some("+delta".into());
+        store.apply_delta(d);
+
+        let msgs = store.messages("s1");
+        assert_eq!(msgs[0].content, "old", "older duplicate must be untouched");
+        assert_eq!(
+            msgs[2].content, "new+delta",
+            "newest duplicate gets the delta"
+        );
+    }
+
+    #[test]
+    fn apply_delta_still_reaches_older_messages() {
+        // The reverse scan is an optimization, not a truncation — deltas
+        // for non-tail messages must still land.
+        let mut store = MessageStore::default();
+        store.apply_message(mk_msg("s1", "m1"));
+        store.apply_message(mk_msg("s1", "m2"));
+        store.apply_message(mk_msg("s1", "m3"));
+
+        let mut d = mk_delta("s1", "m1");
+        d.content_append = Some("first".into());
+        store.apply_delta(d);
+
+        assert_eq!(store.messages("s1")[0].content, "first");
+    }
+
+    #[test]
+    fn upsert_replaces_newest_duplicate() {
+        let mut store = MessageStore::default();
+        let mut old_dup = mk_msg("s1", "dup");
+        old_dup.content = "old".into();
+        let mut new_dup = mk_msg("s1", "dup");
+        new_dup.content = "new".into();
+        store.replace_scrollback("s1".into(), vec![old_dup, new_dup]);
+
+        let mut incoming = mk_msg("s1", "dup");
+        incoming.content = "replaced".into();
+        store.apply_message(incoming);
+
+        let msgs = store.messages("s1");
+        assert_eq!(msgs.len(), 2, "upsert must not append a third copy");
+        assert_eq!(msgs[0].content, "old");
+        assert_eq!(msgs[1].content, "replaced");
     }
 
     #[test]

@@ -20,7 +20,7 @@ use tui_textarea::TextArea;
 
 use self::messages::MessageStore;
 use self::render_cache::RenderCache;
-use self::scrollback_build::ScrollbackBuild;
+use self::scrollback_build::ScrollbackBuildCache;
 use self::sessions::SessionList;
 
 /// Entire UI state. Every mutation goes through a single `apply_*` method
@@ -45,8 +45,11 @@ pub struct AppState {
     /// latest (Bottom mode); positive = scrolled up (Anchored mode).
     /// While positive, the renderer auto-bumps this each frame as new
     /// content streams in at the bottom, so the user's view stays
-    /// pinned to the content they were reading.
-    pub scroll_offset: u16,
+    /// pinned to the content they were reading. `usize` on purpose: a
+    /// u16 caps at 65 535 wrapped rows, which made the top of large
+    /// sessions unreachable. Only the intra-viewport remainder is ever
+    /// handed to ratatui's u16 `Paragraph::scroll`.
+    pub scroll_offset: usize,
     /// Total rendered rows of the transcript on the previous frame.
     /// Used to detect "new content arrived at the bottom" and update
     /// `scroll_offset` + `unseen_below_rows` accordingly.
@@ -83,11 +86,12 @@ pub struct AppState {
     pub render_cache: RenderCache,
     /// Frame-to-frame cache of the *assembled* scrollback (every
     /// visible message's lines concatenated + the `total_rendered_rows`
-    /// count for scroll math). Hits whenever the focused session, its
-    /// epoch, and the viewport width are all unchanged — i.e. on every
-    /// keystroke into the prompt and every idle frame. See
-    /// [`ScrollbackBuild`] for the keying rules.
-    pub scrollback_build: ScrollbackBuild,
+    /// count for scroll math), kept per session in a small LRU so
+    /// switching focus back to a recent session is a hit. Hits whenever
+    /// the focused session's epoch and the viewport width are unchanged
+    /// — i.e. on every keystroke into the prompt and every idle frame.
+    /// See [`ScrollbackBuildCache`] for the keying rules.
+    pub scrollback_build: ScrollbackBuildCache,
     /// Global override for tool-output truncation. When true, every tool
     /// body renders fully (still capped at the verbose ceiling so a
     /// 10 000-line `find` doesn't melt the renderer). When false, the
@@ -158,7 +162,7 @@ impl AppState {
             attached: HashSet::new(),
             connection: ConnectionState::Connected,
             render_cache: RenderCache::default(),
-            scrollback_build: ScrollbackBuild::default(),
+            scrollback_build: ScrollbackBuildCache::default(),
             verbose_tool_output: false,
             expanded_tool_message_ids: HashSet::new(),
             selected_tool_message_id: None,
@@ -214,11 +218,19 @@ impl AppState {
         self.selected_tool_message_id = Some(next.clone());
         // Both the old and new selected blocks render with a different
         // header style, so invalidate per-message caches for them.
-        if let Some(old) = prev_selected {
-            self.render_cache.invalidate(&old);
+        // `ids` was non-empty, so a focused session id exists. Selection
+        // is focused-session-local, so only that session's assembled
+        // build is stale — evicting just it (instead of clearing the
+        // whole LRU) keeps other sessions' A→B→A build hits alive and
+        // preserves the "render-cache sessions ⊆ build-LRU sessions"
+        // memory bound.
+        if let Some(sid) = self.sessions.focused_id().map(ToString::to_string) {
+            if let Some(old) = prev_selected {
+                self.render_cache.invalidate(&sid, &old);
+            }
+            self.render_cache.invalidate(&sid, &next);
+            self.scrollback_build.evict_session(&sid);
         }
-        self.render_cache.invalidate(&next);
-        self.scrollback_build.clear();
     }
 
     /// Toggle the per-block expand state for the current selection.
@@ -238,8 +250,13 @@ impl AppState {
             self.expanded_tool_message_ids.insert(id.clone());
         }
         self.selected_tool_message_id = Some(id.clone());
-        self.render_cache.invalidate(&id);
-        self.scrollback_build.clear();
+        // Expand state is focused-session-local (the target id came
+        // from the focused session's tool calls) — evict only that
+        // session's build, same as cycle_tool_block_selection.
+        if let Some(sid) = self.sessions.focused_id().map(ToString::to_string) {
+            self.render_cache.invalidate(&sid, &id);
+            self.scrollback_build.evict_session(&sid);
+        }
     }
 
     /// Drain the prompt into a `String` and reset the editor. Returns
@@ -334,18 +351,18 @@ impl AppState {
 
     /// Scroll up by N rendered rows. Transitions Bottom → Anchored on
     /// the first row of upward movement.
-    pub fn scroll_up(&mut self, by: u16) {
+    pub fn scroll_up(&mut self, by: usize) {
         self.scroll_offset = self.scroll_offset.saturating_add(by);
     }
 
     /// Scroll down by N rendered rows. Once the offset returns to 0 we
     /// drop the unseen-below counter — the user has caught up.
-    pub fn scroll_down(&mut self, by: u16) {
+    pub fn scroll_down(&mut self, by: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(by);
         // The user has scrolled past some of the previously-unseen
         // content; clamp so the indicator never reports more "new
         // below" than actually remains below the viewport.
-        self.unseen_below_rows = self.unseen_below_rows.min(self.scroll_offset as usize);
+        self.unseen_below_rows = self.unseen_below_rows.min(self.scroll_offset);
     }
 
     /// Jump back to the natural bottom (= sticky / following mode).
@@ -358,7 +375,7 @@ impl AppState {
     /// Jump to the top of the transcript. Implementation: set offset to
     /// the maximum so the renderer's saturating math lands at row 0.
     pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = u16::MAX;
+        self.scroll_offset = usize::MAX;
     }
 
     /// Called by the renderer once it knows the post-wrap row count.
@@ -370,12 +387,7 @@ impl AppState {
     pub fn note_total_rendered(&mut self, total: usize) {
         if self.scroll_offset > 0 && total > self.last_total_rendered {
             let delta = total - self.last_total_rendered;
-            // u16 saturation is fine: at >65k rows below the fold, the
-            // exact count stops being meaningful — the indicator just
-            // shows "lots".
-            self.scroll_offset = self
-                .scroll_offset
-                .saturating_add(delta.min(u16::MAX as usize) as u16);
+            self.scroll_offset = self.scroll_offset.saturating_add(delta);
             self.unseen_below_rows = self.unseen_below_rows.saturating_add(delta);
         }
         self.last_total_rendered = total;
@@ -537,6 +549,55 @@ mod tests {
     use super::*;
     use codeoid_protocol::{IdentityType, MessageIdentity};
 
+    fn mk_session_info(id: &str) -> SessionInfo {
+        SessionInfo {
+            id: id.into(),
+            name: "demo".into(),
+            workdir: "/tmp".into(),
+            status: codeoid_protocol::SessionStatus::Idle,
+            created_by: "u".into(),
+            created_at: "2026-06-23T00:00:00Z".into(),
+            attached_clients: 0,
+            mode: None,
+            turns_remaining: None,
+            pinned_files: None,
+            agent_uri: None,
+            subagents: None,
+            usage: None,
+            rotation: None,
+            queued_messages: None,
+            model: None,
+            fallback_model: None,
+        }
+    }
+
+    fn tool_call_msg(sid: &str, mid: &str) -> codeoid_protocol::SessionMessage {
+        codeoid_protocol::SessionMessage {
+            session_id: sid.into(),
+            message_id: mid.into(),
+            role: codeoid_protocol::MessageRole::ToolCall,
+            content: String::new(),
+            parts: None,
+            identity: MessageIdentity {
+                sub: "spiffe://x/agent/t".into(),
+                name: None,
+                kind: IdentityType::Agent,
+            },
+            tool: Some(codeoid_protocol::ToolInfo {
+                tool_id: "t1".into(),
+                name: "Bash".into(),
+                state: codeoid_protocol::ToolState::Completed {
+                    success: true,
+                    output: None,
+                    elapsed_ms: Some(1),
+                    confirmed_by: None,
+                },
+            }),
+            metadata: None,
+            timestamp: "2026-06-23T00:00:00Z".into(),
+        }
+    }
+
     fn mk_state() -> AppState {
         AppState::new(AuthOkMsg {
             identity: MessageIdentity {
@@ -612,6 +673,55 @@ mod tests {
             "second call should return false"
         );
         assert!(state.note_attached("s2"));
+    }
+
+    #[test]
+    fn tool_selection_evicts_only_the_focused_sessions_build() {
+        let mut state = mk_state();
+        state.sessions.upsert(mk_session_info("s1")); // auto-focuses s1
+        state.sessions.upsert(mk_session_info("s2"));
+        state.messages.apply_message(tool_call_msg("s1", "t-a"));
+        // Seed cached builds for both sessions.
+        let _ = state
+            .scrollback_build
+            .insert("s1".into(), scrollback_build::ScrollbackBuild::default());
+        let _ = state
+            .scrollback_build
+            .insert("s2".into(), scrollback_build::ScrollbackBuild::default());
+
+        state.cycle_tool_block_selection(true);
+
+        assert!(
+            state.scrollback_build.get("s1").is_none(),
+            "focused session's build is stale after selection change"
+        );
+        assert!(
+            state.scrollback_build.get("s2").is_some(),
+            "selection is session-local — other sessions keep their builds"
+        );
+    }
+
+    #[test]
+    fn tool_expand_evicts_only_the_focused_sessions_build() {
+        let mut state = mk_state();
+        state.sessions.upsert(mk_session_info("s1"));
+        state.sessions.upsert(mk_session_info("s2"));
+        state.messages.apply_message(tool_call_msg("s1", "t-a"));
+        let _ = state
+            .scrollback_build
+            .insert("s1".into(), scrollback_build::ScrollbackBuild::default());
+        let _ = state
+            .scrollback_build
+            .insert("s2".into(), scrollback_build::ScrollbackBuild::default());
+
+        state.toggle_expand_selected_tool_block();
+
+        assert!(state.expanded_tool_message_ids.contains("t-a"));
+        assert!(state.scrollback_build.get("s1").is_none());
+        assert!(
+            state.scrollback_build.get("s2").is_some(),
+            "expand is session-local — other sessions keep their builds"
+        );
     }
 
     #[test]
@@ -712,12 +822,38 @@ mod tests {
 
     #[test]
     fn scroll_to_top_lands_at_zero_after_render() {
-        // scroll_to_top sets offset to u16::MAX; the renderer's
+        // scroll_to_top sets offset to usize::MAX; the renderer's
         // saturating math turns that into row 0. Here we just verify
         // the state-side contract.
         let mut state = mk_state();
         state.scroll_to_top();
-        assert_eq!(state.scroll_offset, u16::MAX);
+        assert_eq!(state.scroll_offset, usize::MAX);
+    }
+
+    #[test]
+    fn scroll_offset_exceeds_former_u16_ceiling() {
+        // Regression: scroll_offset was u16, capping scrollback at
+        // 65 535 wrapped rows — the top of big sessions was unreachable.
+        let mut state = mk_state();
+        state.note_total_rendered(200_000);
+        state.scroll_up(70_000);
+        assert_eq!(state.scroll_offset, 70_000);
+
+        // Anchored maintenance across the old ceiling: new rows at the
+        // bottom keep bumping the offset with no saturation at 65 535.
+        state.note_total_rendered(300_000);
+        assert_eq!(state.scroll_offset, 170_000);
+        assert_eq!(state.unseen_below_rows, 100_000);
+
+        // The renderer's `y = max_y - offset` math: with viewport 50,
+        // max_y = 299_950 and every row above the old ceiling is
+        // reachable.
+        let max_y = 300_000usize.saturating_sub(50);
+        assert_eq!(max_y.saturating_sub(state.scroll_offset), 129_950);
+
+        // And scroll_to_top from here pins to row 0.
+        state.scroll_to_top();
+        assert_eq!(max_y.saturating_sub(state.scroll_offset), 0);
     }
 
     #[test]

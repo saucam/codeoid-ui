@@ -1,5 +1,7 @@
 //! Session list + focus state.
 
+use std::collections::HashMap;
+
 use codeoid_protocol::SessionInfo;
 
 #[derive(Debug, Default)]
@@ -11,7 +13,22 @@ pub struct SessionList {
 impl SessionList {
     pub fn replace(&mut self, items: Vec<SessionInfo>) {
         let previously_focused = self.focused_id().map(ToString::to_string);
-        self.items = items;
+        // Session ids are daemon-minted UUIDs and unique by contract,
+        // but a Vec would happily keep duplicates from a buggy replay —
+        // and every by-id lookup (focus_id, status updates, upsert)
+        // assumes uniqueness. Dedupe defensively: last occurrence wins
+        // (newest data), first position kept (stable tab order).
+        let mut deduped: Vec<SessionInfo> = Vec::with_capacity(items.len());
+        let mut index_of: HashMap<String, usize> = HashMap::with_capacity(items.len());
+        for s in items {
+            if let Some(&i) = index_of.get(&s.id) {
+                deduped[i] = s;
+            } else {
+                index_of.insert(s.id.clone(), deduped.len());
+                deduped.push(s);
+            }
+        }
+        self.items = deduped;
         self.focused = previously_focused
             .as_deref()
             .and_then(|id| self.items.iter().position(|s| s.id == id))
@@ -148,6 +165,23 @@ mod tests {
         list.replace(vec![mk("a", "A")]);
         list.replace(vec![]);
         assert_eq!(list.focused_id(), None);
+    }
+
+    #[test]
+    fn replace_dedupes_duplicate_ids_last_wins_first_position() {
+        // Ids are unique by daemon contract; a buggy replay must not
+        // leave two tabs with the same id (by-id lookups — focus,
+        // status changes, upsert — all assume uniqueness).
+        let mut list = SessionList::default();
+        let mut newer = mk("a", "A-newer");
+        newer.status = SessionStatus::Working;
+        list.replace(vec![mk("a", "A-old"), mk("b", "B"), newer]);
+
+        assert_eq!(list.items().len(), 2, "duplicate id must collapse");
+        assert_eq!(list.items()[0].id, "a", "first position kept");
+        assert_eq!(list.items()[0].name, "A-newer", "newest data wins");
+        assert!(matches!(list.items()[0].status, SessionStatus::Working));
+        assert_eq!(list.items()[1].id, "b");
     }
 
     #[test]
