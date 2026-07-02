@@ -1323,8 +1323,8 @@ fn autocomplete_command(state: &mut AppState) {
 /// (more, less, vim) keeps one row of overlap on each page so the
 /// reader doesn't lose their place. Falls back to a sane default
 /// before the first frame, when we don't yet know the viewport size.
-fn page_step(state: &AppState) -> u16 {
-    state.last_viewport_rows.saturating_sub(1).max(10)
+fn page_step(state: &AppState) -> usize {
+    usize::from(state.last_viewport_rows.saturating_sub(1).max(10))
 }
 
 /// Returns `true` if the app's visual state will change on the next tick —

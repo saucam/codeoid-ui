@@ -45,8 +45,11 @@ pub struct AppState {
     /// latest (Bottom mode); positive = scrolled up (Anchored mode).
     /// While positive, the renderer auto-bumps this each frame as new
     /// content streams in at the bottom, so the user's view stays
-    /// pinned to the content they were reading.
-    pub scroll_offset: u16,
+    /// pinned to the content they were reading. `usize` on purpose: a
+    /// u16 caps at 65 535 wrapped rows, which made the top of large
+    /// sessions unreachable. Only the intra-viewport remainder is ever
+    /// handed to ratatui's u16 `Paragraph::scroll`.
+    pub scroll_offset: usize,
     /// Total rendered rows of the transcript on the previous frame.
     /// Used to detect "new content arrived at the bottom" and update
     /// `scroll_offset` + `unseen_below_rows` accordingly.
@@ -334,18 +337,18 @@ impl AppState {
 
     /// Scroll up by N rendered rows. Transitions Bottom → Anchored on
     /// the first row of upward movement.
-    pub fn scroll_up(&mut self, by: u16) {
+    pub fn scroll_up(&mut self, by: usize) {
         self.scroll_offset = self.scroll_offset.saturating_add(by);
     }
 
     /// Scroll down by N rendered rows. Once the offset returns to 0 we
     /// drop the unseen-below counter — the user has caught up.
-    pub fn scroll_down(&mut self, by: u16) {
+    pub fn scroll_down(&mut self, by: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(by);
         // The user has scrolled past some of the previously-unseen
         // content; clamp so the indicator never reports more "new
         // below" than actually remains below the viewport.
-        self.unseen_below_rows = self.unseen_below_rows.min(self.scroll_offset as usize);
+        self.unseen_below_rows = self.unseen_below_rows.min(self.scroll_offset);
     }
 
     /// Jump back to the natural bottom (= sticky / following mode).
@@ -358,7 +361,7 @@ impl AppState {
     /// Jump to the top of the transcript. Implementation: set offset to
     /// the maximum so the renderer's saturating math lands at row 0.
     pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = u16::MAX;
+        self.scroll_offset = usize::MAX;
     }
 
     /// Called by the renderer once it knows the post-wrap row count.
@@ -370,12 +373,7 @@ impl AppState {
     pub fn note_total_rendered(&mut self, total: usize) {
         if self.scroll_offset > 0 && total > self.last_total_rendered {
             let delta = total - self.last_total_rendered;
-            // u16 saturation is fine: at >65k rows below the fold, the
-            // exact count stops being meaningful — the indicator just
-            // shows "lots".
-            self.scroll_offset = self
-                .scroll_offset
-                .saturating_add(delta.min(u16::MAX as usize) as u16);
+            self.scroll_offset = self.scroll_offset.saturating_add(delta);
             self.unseen_below_rows = self.unseen_below_rows.saturating_add(delta);
         }
         self.last_total_rendered = total;
@@ -712,12 +710,38 @@ mod tests {
 
     #[test]
     fn scroll_to_top_lands_at_zero_after_render() {
-        // scroll_to_top sets offset to u16::MAX; the renderer's
+        // scroll_to_top sets offset to usize::MAX; the renderer's
         // saturating math turns that into row 0. Here we just verify
         // the state-side contract.
         let mut state = mk_state();
         state.scroll_to_top();
-        assert_eq!(state.scroll_offset, u16::MAX);
+        assert_eq!(state.scroll_offset, usize::MAX);
+    }
+
+    #[test]
+    fn scroll_offset_exceeds_former_u16_ceiling() {
+        // Regression: scroll_offset was u16, capping scrollback at
+        // 65 535 wrapped rows — the top of big sessions was unreachable.
+        let mut state = mk_state();
+        state.note_total_rendered(200_000);
+        state.scroll_up(70_000);
+        assert_eq!(state.scroll_offset, 70_000);
+
+        // Anchored maintenance across the old ceiling: new rows at the
+        // bottom keep bumping the offset with no saturation at 65 535.
+        state.note_total_rendered(300_000);
+        assert_eq!(state.scroll_offset, 170_000);
+        assert_eq!(state.unseen_below_rows, 100_000);
+
+        // The renderer's `y = max_y - offset` math: with viewport 50,
+        // max_y = 299_950 and every row above the old ceiling is
+        // reachable.
+        let max_y = 300_000usize.saturating_sub(50);
+        assert_eq!(max_y.saturating_sub(state.scroll_offset), 129_950);
+
+        // And scroll_to_top from here pins to row 0.
+        state.scroll_to_top();
+        assert_eq!(max_y.saturating_sub(state.scroll_offset), 0);
     }
 
     #[test]

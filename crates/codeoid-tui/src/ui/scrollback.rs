@@ -174,7 +174,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     state.note_total_rendered(total_rendered);
 
     let max_y = total_rendered.saturating_sub(viewport_rows);
-    let y = max_y.saturating_sub(state.scroll_offset as usize);
+    let y = max_y.saturating_sub(state.scroll_offset);
 
     // Hand ratatui only the logical lines that intersect the viewport,
     // not the whole transcript. This is what keeps scrolling O(viewport):
@@ -561,7 +561,7 @@ mod tests {
         terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
         // Scroll to the very top; the window must now show the earliest lines
         // and not the latest — i.e. the slice tracked the offset.
-        state.scroll_offset = u16::MAX;
+        state.scroll_offset = usize::MAX;
         terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
 
         let text = buf_text(&terminal);
