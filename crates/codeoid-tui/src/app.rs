@@ -463,10 +463,13 @@ impl App {
             DaemonMessage::SessionStatusChange {
                 session_id, status, ..
             } => {
+                // Newest sessions live at the tail — search from the back
+                // (status flips overwhelmingly target recent sessions).
                 if let Some(s) = state
                     .sessions
                     .items()
                     .iter()
+                    .rev()
                     .find(|s| s.id == session_id)
                     .cloned()
                 {
