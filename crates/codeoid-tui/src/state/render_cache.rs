@@ -28,6 +28,8 @@ use std::collections::HashMap;
 
 use ratatui::text::Line;
 
+use super::scrollback_build::wrapped_row_count;
+
 #[derive(Default)]
 pub struct RenderCache {
     /// `session_id` → (`message_id` → cached render).
@@ -38,10 +40,19 @@ struct CachedEntry {
     version: u64,
     width: u16,
     lines: Vec<Line<'static>>,
+    /// Wrapped-row count per line at `width`, measured once when the
+    /// entry is stored. Lets the scrollback build assemble its prefix
+    /// sum from cached integers instead of re-measuring every line of
+    /// the transcript on each rebuild (the dominant per-frame cost
+    /// while a tool was animating). A version bump (content delta)
+    /// recomputes only THIS message's counts; a width change (resize)
+    /// misses every entry — exactly the required invalidation scope.
+    row_counts: Vec<usize>,
 }
 
 impl RenderCache {
-    /// Fetch cached lines for a message, or render-and-store on miss.
+    /// Fetch cached lines (and their wrapped-row counts at `width`) for
+    /// a message, or render-and-store on miss.
     /// `skip_cache = true` always re-renders and never stores — use it
     /// for animated content whose appearance changes per anim_tick.
     pub fn get_or_render<F>(
@@ -52,12 +63,14 @@ impl RenderCache {
         width: u16,
         skip_cache: bool,
         render_fn: F,
-    ) -> Vec<Line<'static>>
+    ) -> (Vec<Line<'static>>, Vec<usize>)
     where
         F: FnOnce() -> Vec<Line<'static>>,
     {
         if skip_cache {
-            return render_fn();
+            let lines = render_fn();
+            let counts = measure(&lines, width);
+            return (lines, counts);
         }
 
         if let Some(entry) = self
@@ -66,11 +79,12 @@ impl RenderCache {
             .and_then(|s| s.get(message_id))
         {
             if entry.version == version && entry.width == width {
-                return entry.lines.clone();
+                return (entry.lines.clone(), entry.row_counts.clone());
             }
         }
 
         let lines = render_fn();
+        let counts = measure(&lines, width);
         self.sessions
             .entry(session_id.to_string())
             .or_default()
@@ -80,9 +94,10 @@ impl RenderCache {
                     version,
                     width,
                     lines: lines.clone(),
+                    row_counts: counts.clone(),
                 },
             );
-        lines
+        (lines, counts)
     }
 
     /// Drop a single message's entry. Called when a message's rendered
@@ -124,6 +139,12 @@ impl RenderCache {
             .get(session_id)
             .is_some_and(|s| s.contains_key(message_id))
     }
+}
+
+/// Wrapped-row count for every line, with ratatui's own math (see
+/// [`wrapped_row_count`]). Runs once per store, never per frame.
+fn measure(lines: &[Line<'static>], width: u16) -> Vec<usize> {
+    lines.iter().map(|l| wrapped_row_count(l, width)).collect()
 }
 
 impl std::fmt::Debug for RenderCache {
@@ -248,8 +269,8 @@ mod tests {
     fn sessions_are_isolated() {
         // The same message id in two sessions must cache independently.
         let mut cache = RenderCache::default();
-        let a = cache.get_or_render("s1", "m1", 1, 80, false, || lines("from-s1"));
-        let b = cache.get_or_render("s2", "m1", 1, 80, false, || lines("from-s2"));
+        let (a, _) = cache.get_or_render("s1", "m1", 1, 80, false, || lines("from-s1"));
+        let (b, _) = cache.get_or_render("s2", "m1", 1, 80, false, || lines("from-s2"));
         assert_ne!(a[0].spans[0].content, b[0].spans[0].content);
         // Both hits afterwards.
         let mut renders = 0;
@@ -276,6 +297,66 @@ mod tests {
         assert!(!cache.contains("s1", "m1"));
         assert!(!cache.contains("s1", "m2"));
         assert!(cache.contains("s2", "m1"));
+    }
+
+    // ============ wrapped-row-count caching ============
+
+    #[test]
+    fn row_counts_reflect_wrapping_at_stored_width() {
+        let mut cache = RenderCache::default();
+        // 25 chars, no spaces, at width 10 → 3 wrapped rows.
+        let (_, counts) = cache.get_or_render("s1", "m1", 1, 10, false, || {
+            lines("abcdefghijklmnopqrstuvwxy")
+        });
+        assert_eq!(counts, vec![3]);
+        // Cache hit returns the same counts without re-measuring.
+        let (_, counts_again) =
+            cache.get_or_render("s1", "m1", 1, 10, false, || panic!("must be a cache hit"));
+        assert_eq!(counts_again, vec![3]);
+    }
+
+    #[test]
+    fn content_delta_recomputes_only_that_message() {
+        let mut cache = RenderCache::default();
+        let _ = cache.get_or_render("s1", "m1", 1, 10, false, || lines("short"));
+        let _ = cache.get_or_render("s1", "m2", 1, 10, false, || lines("short"));
+
+        // m1's version bumps (content delta) → only m1 re-renders and
+        // re-measures; m2 stays a pure hit.
+        let mut renders = 0;
+        let (_, c1) = cache.get_or_render("s1", "m1", 2, 10, false, || {
+            renders += 1;
+            lines("abcdefghijklmnopqrst") // 20 chars → 2 rows at width 10
+        });
+        let (_, c2) = cache.get_or_render("s1", "m2", 1, 10, false, || {
+            renders += 1;
+            lines("short")
+        });
+        assert_eq!(renders, 1, "only the changed message re-renders");
+        assert_eq!(c1, vec![2]);
+        assert_eq!(c2, vec![1]);
+    }
+
+    #[test]
+    fn width_change_recomputes_all_counts() {
+        let mut cache = RenderCache::default();
+        let _ = cache.get_or_render("s1", "m1", 1, 40, false, || lines("abcdefghijklmnopqrst"));
+        let _ = cache.get_or_render("s1", "m2", 1, 40, false, || lines("abcdefghijklmnopqrst"));
+
+        // Resize → every entry misses and counts are re-measured at the
+        // new width (20 chars at width 10 → 2 rows).
+        let mut renders = 0;
+        let (_, c1) = cache.get_or_render("s1", "m1", 1, 10, false, || {
+            renders += 1;
+            lines("abcdefghijklmnopqrst")
+        });
+        let (_, c2) = cache.get_or_render("s1", "m2", 1, 10, false, || {
+            renders += 1;
+            lines("abcdefghijklmnopqrst")
+        });
+        assert_eq!(renders, 2, "width change must re-render everything");
+        assert_eq!(c1, vec![2]);
+        assert_eq!(c2, vec![2]);
     }
 
     #[test]
