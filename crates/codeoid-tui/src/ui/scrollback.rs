@@ -67,20 +67,59 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let epoch = state.messages.epoch_of_session(&session_id);
 
     // Animated content (running tool spinners, elapsed-time counters)
-    // must repaint every tick. If any focused-session message is
-    // animating, force a rebuild so the spinner actually advances.
+    // must repaint every tick even though the message content (and thus
+    // the session epoch) is unchanged.
     let any_animating = state
         .messages
         .messages(&session_id)
         .iter()
         .any(is_animating);
 
-    let cache_hit = !any_animating
-        && state
-            .scrollback_build
-            .matches(&session_id, inner_width, epoch);
+    let build_matches = state
+        .scrollback_build
+        .matches(&session_id, inner_width, epoch);
 
-    if !cache_hit {
+    if build_matches {
+        // Mark the session most-recently-focused so LRU eviction
+        // tracks focus recency, not just rebuild recency.
+        state.scrollback_build.touch(&session_id);
+    }
+
+    if build_matches && any_animating {
+        // Animation-only frame: same content (epoch unchanged), same
+        // width — only the animating messages' spinner/elapsed lines
+        // look different. Re-render JUST those messages and splice them
+        // into the cached build. This is what keeps a running tool at
+        // 10 Hz from re-cloning and re-measuring the whole transcript
+        // every tick: cost is O(animating lines), not O(total lines).
+        let AppState {
+            ref messages,
+            ref mut scrollback_build,
+            ..
+        } = *state;
+        if let Some(build) = scrollback_build.get_mut(&session_id) {
+            for m in messages
+                .messages(&session_id)
+                .iter()
+                .filter(|m| is_animating(m))
+            {
+                let per_block_expanded = expanded_ids.contains(&m.message_id);
+                let is_selected = selected_id.as_deref() == Some(m.message_id.as_str());
+                let mut new_lines = render_message(
+                    m,
+                    anim_tick,
+                    verbose_tools || per_block_expanded,
+                    is_selected,
+                );
+                if !new_lines.is_empty() {
+                    // Trailing separator, exactly as the full rebuild
+                    // appends per rendered message.
+                    new_lines.push(Line::raw(""));
+                }
+                build.splice_message(&m.message_id, new_lines);
+            }
+        }
+    } else if !build_matches {
         // Rebuild: split-borrow `messages` + `render_cache` +
         // `scrollback_build` (disjoint fields, so Rust accepts this
         // simultaneously via the destructuring pattern).
@@ -93,29 +132,44 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
 
         let msgs = messages.messages(&session_id);
 
-        // Bound the per-message render cache to the focused session's
-        // live ids. Without this it grows monotonically across
-        // rotations / session switches and `apply_delta` lookups
-        // gradually slow down — visible as prompt lag after many turns.
+        // Bound THIS session's per-message render cache to its live
+        // ids. Without this it grows monotonically across rotations and
+        // scrollback replaces. Scoped to the session on purpose: the
+        // old retain-across-everything variant evicted every OTHER
+        // session's cached renders on focus switch, making each Tab an
+        // O(N) re-parse of the target session.
         let live_ids: std::collections::HashSet<String> =
             msgs.iter().map(|m| m.message_id.clone()).collect();
-        render_cache.retain_only(&live_ids);
+        render_cache.retain_session(&session_id, &live_ids);
 
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(msgs.len() * 4);
+        let mut row_counts: Vec<usize> = Vec::with_capacity(msgs.len() * 4);
+        let mut segments: Vec<crate::state::scrollback_build::BuildSegment> =
+            Vec::with_capacity(msgs.len());
         for m in msgs {
             let skip_cache = is_animating(m);
             let version = messages.version_of(&m.message_id);
             let per_block_expanded = expanded_ids.contains(&m.message_id);
             let is_selected = selected_id.as_deref() == Some(m.message_id.as_str());
-            let rendered =
-                render_cache.get_or_render(&m.message_id, version, inner_width, skip_cache, || {
+            // Cached messages come back with their wrapped-row counts
+            // measured once at store time — the rebuild never re-wraps
+            // unchanged content, so a streaming session rebuilds in
+            // O(changed lines) measurement, not O(transcript).
+            let (rendered, counts) = render_cache.get_or_render(
+                &session_id,
+                &m.message_id,
+                version,
+                inner_width,
+                skip_cache,
+                || {
                     render_message(
                         m,
                         anim_tick,
                         verbose_tools || per_block_expanded,
                         is_selected,
                     )
-                });
+                },
+            );
             if rendered.is_empty() {
                 // Placeholder messages (empty assistant/thinking
                 // mid-stream) don't render in the transcript — the
@@ -123,8 +177,16 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                 // "something is happening".
                 continue;
             }
+            let first_line = lines.len();
             lines.extend(rendered);
+            row_counts.extend(counts);
             lines.push(Line::raw(""));
+            row_counts.push(1); // separator: empty line = 1 row at any width
+            segments.push(crate::state::scrollback_build::BuildSegment {
+                message_id: m.message_id.clone(),
+                first_line,
+                line_count: lines.len() - first_line,
+            });
         }
 
         if msgs.is_empty() {
@@ -138,30 +200,36 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                         .add_modifier(Modifier::ITALIC),
                 ),
             ]));
+            for line in &lines {
+                row_counts.push(crate::state::scrollback_build::wrapped_row_count(
+                    line,
+                    inner_width,
+                ));
+            }
         }
 
-        // Per-logical-line wrapped-row prefix sum. We use Paragraph's own
-        // line_count per line (ratatui wraps each Line independently, so
-        // the per-line counts sum to the whole-buffer count) — this keeps
-        // the scroll math byte-for-byte consistent with how the windowed
-        // slice is laid out on render, and never under-reports the bottom
-        // row. Built once per cache miss; the render path below never
-        // walks the whole buffer again.
-        let mut row_offsets: Vec<usize> = Vec::with_capacity(lines.len() + 1);
-        let mut acc = 0usize;
-        row_offsets.push(0);
-        for line in &lines {
-            acc += Paragraph::new(vec![line.clone()])
-                .wrap(Wrap { trim: false })
-                .line_count(inner_width);
-            row_offsets.push(acc);
+        // Per-logical-line wrapped-row prefix sum, assembled from the
+        // cached per-message counts (ratatui wraps each Line
+        // independently, so per-line counts sum to the whole-buffer
+        // count — scroll math stays byte-for-byte consistent with how
+        // the windowed slice is laid out on render, and never
+        // under-reports the bottom row).
+        let mut build = crate::state::scrollback_build::ScrollbackBuild {
+            width: inner_width,
+            epoch,
+            lines,
+            total_rendered_rows: 0,
+            row_counts,
+            row_offsets: Vec::new(),
+            segments,
+        };
+        build.rebuild_offsets();
+        // A session pushed off the LRU takes its per-message render
+        // cache with it — that's what bounds total memory across many
+        // sessions.
+        if let Some(evicted) = scrollback_build.insert(session_id.clone(), build) {
+            render_cache.evict_session(&evicted);
         }
-        scrollback_build.session_id = Some(session_id.clone());
-        scrollback_build.width = inner_width;
-        scrollback_build.epoch = epoch;
-        scrollback_build.lines = lines;
-        scrollback_build.total_rendered_rows = acc;
-        scrollback_build.row_offsets = row_offsets;
     }
 
     // Scroll math reuses the precomputed total. While the user is
@@ -170,23 +238,28 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     // the previous frame, so the visible window stays pinned to the
     // content the user was reading. Bottom mode (offset = 0) just
     // follows the latest row.
-    let total_rendered = state.scrollback_build.total_rendered_rows;
+    let total_rendered = state
+        .scrollback_build
+        .get(&session_id)
+        .map_or(0, |b| b.total_rendered_rows);
     state.note_total_rendered(total_rendered);
 
     let max_y = total_rendered.saturating_sub(viewport_rows);
-    let y = max_y.saturating_sub(state.scroll_offset as usize);
+    let y = max_y.saturating_sub(state.scroll_offset);
 
     // Hand ratatui only the logical lines that intersect the viewport,
     // not the whole transcript. This is what keeps scrolling O(viewport):
     // a 10k-line session re-wraps ~viewport rows per frame instead of all
     // 10k. `y` is the top visible wrapped row; the slice + intra-line
     // scroll offset reproduce exactly that window.
-    let (first, intra, last) = crate::state::scrollback_build::visible_window(
-        &state.scrollback_build.row_offsets,
-        y,
-        viewport_rows,
-    );
-    let window: Vec<Line<'static>> = state.scrollback_build.lines[first..last].to_vec();
+    let Some(build) = state.scrollback_build.get(&session_id) else {
+        // Unreachable: the branch above always inserts a build for the
+        // focused session. Render nothing rather than panic.
+        return;
+    };
+    let (first, intra, last) =
+        crate::state::scrollback_build::visible_window(&build.row_offsets, y, viewport_rows);
+    let window: Vec<Line<'static>> = build.lines[first..last].to_vec();
     let paragraph = Paragraph::new(window)
         .wrap(Wrap { trim: false })
         .scroll((intra.min(u16::MAX as usize) as u16, 0))
@@ -533,18 +606,191 @@ mod tests {
         terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
 
         // The cache miss built the prefix sum; its last entry is the total.
-        let off = &state.scrollback_build.row_offsets;
+        let build = state.scrollback_build.get("s1").expect("build cached");
+        let off = &build.row_offsets;
         assert!(off.len() >= 2, "prefix sum not built");
-        assert_eq!(
-            *off.last().unwrap(),
-            state.scrollback_build.total_rendered_rows
-        );
+        assert_eq!(*off.last().unwrap(), build.total_rendered_rows);
 
         // Following the bottom → the most recent message is on screen.
         assert!(
             buf_text(&terminal).contains("hello message 4"),
             "latest message should be visible"
         );
+    }
+
+    fn tool_msg(sid: &str, id: &str, state: ToolState) -> SessionMessage {
+        SessionMessage {
+            session_id: sid.into(),
+            message_id: id.into(),
+            role: MessageRole::ToolCall,
+            content: String::new(),
+            parts: None,
+            identity: MessageIdentity {
+                sub: "spiffe://x/agent/t".into(),
+                name: None,
+                kind: IdentityType::Agent,
+            },
+            tool: Some(codeoid_protocol::ToolInfo {
+                tool_id: "t1".into(),
+                name: "Bash".into(),
+                state,
+            }),
+            metadata: None,
+            timestamp: "2026-06-23T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn animation_frame_splices_instead_of_rebuilding() {
+        let mut state = mk_state();
+        state.sessions.upsert(mk_session("s1"));
+        state
+            .messages
+            .apply_message(user_msg("s1", "m0", "static message"));
+        state.messages.apply_message(tool_msg(
+            "s1",
+            "m1",
+            ToolState::Executing {
+                progress: None,
+                elapsed_ms: Some(100),
+            },
+        ));
+
+        let mut terminal = Terminal::new(TestBackend::new(50, 14)).unwrap();
+        terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
+        let spinner_t0 = crate::render::spinner::SpinnerFrame::for_tick(state.anim_tick).glyph();
+        assert!(buf_text(&terminal).contains(spinner_t0));
+
+        // Plant a sentinel into the CACHED build for the static
+        // message's line. A full rebuild would overwrite it from the
+        // render cache; an animation-only splice must leave it alone.
+        {
+            let build = state.scrollback_build.get_mut("s1").expect("build cached");
+            let idx = build
+                .lines
+                .iter()
+                .position(|l| l.spans.iter().any(|s| s.content.contains("static message")))
+                .expect("static message line in build");
+            build.lines[idx] = Line::raw("SENTINEL-NOT-REBUILT");
+        }
+
+        // Advance the animation and render again: the spinner must
+        // move (animating message re-rendered + spliced) while the
+        // sentinel survives (everything else untouched).
+        state.tick();
+        terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
+        let text = buf_text(&terminal);
+        let spinner_t1 = crate::render::spinner::SpinnerFrame::for_tick(state.anim_tick).glyph();
+        assert_ne!(spinner_t0, spinner_t1, "test needs distinct glyphs");
+        assert!(
+            text.contains(spinner_t1),
+            "spinner must advance on an animation frame"
+        );
+        assert!(
+            text.contains("SENTINEL-NOT-REBUILT"),
+            "animation frame must splice, not rebuild the whole transcript"
+        );
+
+        // Tool completes (delta bumps the session epoch) → full
+        // rebuild: sentinel replaced by the real cached render.
+        let mut d = codeoid_protocol::SessionMessageDelta {
+            session_id: "s1".into(),
+            message_id: "m1".into(),
+            content_append: None,
+            parts_append: None,
+            parts_update: None,
+            tool_state_update: None,
+            timestamp: "2026-06-23T00:00:02Z".into(),
+        };
+        d.tool_state_update = Some(ToolState::Completed {
+            success: true,
+            output: Some("done".into()),
+            elapsed_ms: Some(250),
+            confirmed_by: None,
+        });
+        state.messages.apply_delta(d);
+        terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
+        let text = buf_text(&terminal);
+        assert!(
+            !text.contains("SENTINEL-NOT-REBUILT"),
+            "tool-state transition must trigger a full rebuild"
+        );
+        assert!(text.contains("static message"));
+    }
+
+    #[test]
+    fn focus_switch_keeps_other_sessions_render_cache() {
+        // Regression: retention used to keep only the FOCUSED session's
+        // ids, so every Tab evicted every other session's cached
+        // renders and switching back was a full O(N) re-parse.
+        let mut state = mk_state();
+        state.sessions.upsert(mk_session("s1")); // auto-focuses s1
+        state.sessions.upsert(mk_session("s2"));
+        for i in 0..3 {
+            state
+                .messages
+                .apply_message(user_msg("s1", &format!("a{i}"), "from s1"));
+            state
+                .messages
+                .apply_message(user_msg("s2", &format!("b{i}"), "from s2"));
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
+        assert!(state.render_cache.contains("s1", "a0"));
+
+        // Focus s2 and render — s1's cached renders must survive, and
+        // s1's assembled build must still be a hit for a straight
+        // A→B→A tab flip.
+        state.sessions.focus_id("s2");
+        terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
+        assert!(state.render_cache.contains("s2", "b0"));
+        assert!(
+            state.render_cache.contains("s1", "a0"),
+            "focus switch must not evict other sessions' cached renders"
+        );
+        let width = 40 - 2; // minus L+R border
+        assert!(
+            state
+                .scrollback_build
+                .matches("s1", width, state.messages.epoch_of_session("s1")),
+            "s1's assembled build should still be cached"
+        );
+    }
+
+    #[test]
+    fn render_cache_evicted_beyond_lru_window() {
+        // Rotate focus through LRU_SESSIONS + 1 sessions; the least-
+        // recently-focused one loses both its build and its per-message
+        // render cache entries (memory bound).
+        let n = crate::state::scrollback_build::LRU_SESSIONS + 1;
+        let mut state = mk_state();
+        for i in 0..n {
+            let sid = format!("s{i}");
+            state.sessions.upsert(mk_session(&sid));
+            state
+                .messages
+                .apply_message(user_msg(&sid, &format!("m{i}"), "hello"));
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        for i in 0..n {
+            state.sessions.focus_id(&format!("s{i}"));
+            terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
+        }
+
+        assert!(
+            !state.render_cache.contains("s0", "m0"),
+            "least-recently-focused session must be evicted with its build"
+        );
+        for i in 1..n {
+            assert!(
+                state
+                    .render_cache
+                    .contains(&format!("s{i}"), &format!("m{i}")),
+                "s{i} is inside the LRU window and must be retained"
+            );
+        }
     }
 
     #[test]
@@ -561,7 +807,7 @@ mod tests {
         terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
         // Scroll to the very top; the window must now show the earliest lines
         // and not the latest — i.e. the slice tracked the offset.
-        state.scroll_offset = u16::MAX;
+        state.scroll_offset = usize::MAX;
         terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
 
         let text = buf_text(&terminal);
