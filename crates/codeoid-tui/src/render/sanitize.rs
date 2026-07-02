@@ -223,10 +223,7 @@ mod tests {
     #[test]
     fn tab_column_ignores_stripped_escapes() {
         // The SGR bytes occupy no columns; "ab" ends at column 2 → pad 6.
-        assert_eq!(
-            sanitize_for_display("\x1b[31mab\x1b[0m\tc"),
-            "ab      c"
-        );
+        assert_eq!(sanitize_for_display("\x1b[31mab\x1b[0m\tc"), "ab      c");
     }
 
     #[test]

@@ -399,7 +399,10 @@ mod tests {
 
         let msgs = store.messages("s1");
         assert_eq!(msgs[0].content, "old", "older duplicate must be untouched");
-        assert_eq!(msgs[2].content, "new+delta", "newest duplicate gets the delta");
+        assert_eq!(
+            msgs[2].content, "new+delta",
+            "newest duplicate gets the delta"
+        );
     }
 
     #[test]

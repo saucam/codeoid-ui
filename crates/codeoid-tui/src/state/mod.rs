@@ -20,7 +20,7 @@ use tui_textarea::TextArea;
 
 use self::messages::MessageStore;
 use self::render_cache::RenderCache;
-use self::scrollback_build::ScrollbackBuild;
+use self::scrollback_build::ScrollbackBuildCache;
 use self::sessions::SessionList;
 
 /// Entire UI state. Every mutation goes through a single `apply_*` method
@@ -86,11 +86,12 @@ pub struct AppState {
     pub render_cache: RenderCache,
     /// Frame-to-frame cache of the *assembled* scrollback (every
     /// visible message's lines concatenated + the `total_rendered_rows`
-    /// count for scroll math). Hits whenever the focused session, its
-    /// epoch, and the viewport width are all unchanged — i.e. on every
-    /// keystroke into the prompt and every idle frame. See
-    /// [`ScrollbackBuild`] for the keying rules.
-    pub scrollback_build: ScrollbackBuild,
+    /// count for scroll math), kept per session in a small LRU so
+    /// switching focus back to a recent session is a hit. Hits whenever
+    /// the focused session's epoch and the viewport width are unchanged
+    /// — i.e. on every keystroke into the prompt and every idle frame.
+    /// See [`ScrollbackBuildCache`] for the keying rules.
+    pub scrollback_build: ScrollbackBuildCache,
     /// Global override for tool-output truncation. When true, every tool
     /// body renders fully (still capped at the verbose ceiling so a
     /// 10 000-line `find` doesn't melt the renderer). When false, the
@@ -161,7 +162,7 @@ impl AppState {
             attached: HashSet::new(),
             connection: ConnectionState::Connected,
             render_cache: RenderCache::default(),
-            scrollback_build: ScrollbackBuild::default(),
+            scrollback_build: ScrollbackBuildCache::default(),
             verbose_tool_output: false,
             expanded_tool_message_ids: HashSet::new(),
             selected_tool_message_id: None,
@@ -217,10 +218,13 @@ impl AppState {
         self.selected_tool_message_id = Some(next.clone());
         // Both the old and new selected blocks render with a different
         // header style, so invalidate per-message caches for them.
-        if let Some(old) = prev_selected {
-            self.render_cache.invalidate(&old);
+        // `ids` was non-empty, so a focused session id exists.
+        if let Some(sid) = self.sessions.focused_id().map(ToString::to_string) {
+            if let Some(old) = prev_selected {
+                self.render_cache.invalidate(&sid, &old);
+            }
+            self.render_cache.invalidate(&sid, &next);
         }
-        self.render_cache.invalidate(&next);
         self.scrollback_build.clear();
     }
 
@@ -241,7 +245,9 @@ impl AppState {
             self.expanded_tool_message_ids.insert(id.clone());
         }
         self.selected_tool_message_id = Some(id.clone());
-        self.render_cache.invalidate(&id);
+        if let Some(sid) = self.sessions.focused_id().map(ToString::to_string) {
+            self.render_cache.invalidate(&sid, &id);
+        }
         self.scrollback_build.clear();
     }
 
