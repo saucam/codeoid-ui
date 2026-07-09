@@ -491,6 +491,7 @@ fn client_kind(msg: &ClientMessage) -> &'static str {
         ClientMessage::SessionRotate { .. } => "session.rotate",
         ClientMessage::SessionSearch { .. } => "session.search",
         ClientMessage::SessionSetModel { .. } => "session.set_model",
+        ClientMessage::SessionSetProvider { .. } => "session.set_provider",
         ClientMessage::SessionRename { .. } => "session.rename",
         ClientMessage::ClaudeConfig { .. } => "claude.config",
         ClientMessage::SessionExport { .. } => "session.export",

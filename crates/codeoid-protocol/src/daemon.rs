@@ -358,6 +358,11 @@ pub struct AuthOkMsg {
     /// `None` on daemons that predate capability negotiation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
+    /// Provider ids registered on this daemon, default first (feeds the
+    /// `/provider` command and the `/new --provider` flag). `None` on
+    /// daemons that predate multi-provider session creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

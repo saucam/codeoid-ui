@@ -1023,7 +1023,12 @@ impl App {
 
     async fn dispatch_slash_command(&mut self, cmd: SlashCommand) {
         match cmd {
-            SlashCommand::New { name, workdir } => self.create_session(name, workdir).await,
+            SlashCommand::New {
+                name,
+                workdir,
+                provider_id,
+            } => self.create_session(name, workdir, provider_id).await,
+            SlashCommand::Provider(provider_id) => self.set_provider(provider_id).await,
             SlashCommand::Rename { name } => self.rename_focused(name).await,
             SlashCommand::Destroy => self.destroy_focused().await,
             SlashCommand::Interrupt => self.interrupt().await,
@@ -1177,7 +1182,12 @@ impl App {
         // which our reducer already merges into AppState.sessions.
     }
 
-    async fn create_session(&mut self, name: String, workdir: Option<String>) {
+    async fn create_session(
+        &mut self,
+        name: String,
+        workdir: Option<String>,
+        provider_id: Option<String>,
+    ) {
         let resolved_workdir = workdir
             .or_else(|| {
                 std::env::current_dir()
@@ -1194,6 +1204,7 @@ impl App {
             id,
             name: name.clone(),
             workdir: resolved_workdir.clone(),
+            provider_id,
         };
         if let Err(e) = handle.send(msg).await {
             if let Some(state) = self.state.as_mut() {
@@ -1210,6 +1221,44 @@ impl App {
             state.last_error = None;
         }
         info!(%name, workdir = %resolved_workdir, "requested session.create");
+    }
+
+    /// `/provider <id>` — switch the focused session's backend. The daemon
+    /// validates fail-closed (unknown id, mid-turn) and its error lands via
+    /// the response; the switch announcement arrives as an info message.
+    async fn set_provider(&mut self, provider_id: String) {
+        let Some(session_id) = self
+            .state
+            .as_ref()
+            .and_then(|s| s.sessions.focused_id().map(ToString::to_string))
+        else {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error("no session focused — /provider needs one");
+            }
+            return;
+        };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
+        let msg = ClientMessage::SessionSetProvider {
+            id: ClientHandle::next_request_id(),
+            session_id,
+            provider_id: provider_id.clone(),
+        };
+        match handle.request_ok(msg).await {
+            Ok(_) => {
+                if let Some(state) = self.state.as_mut() {
+                    state.last_error = None;
+                }
+            }
+            Err(e) => {
+                // Daemon rejections (mid-turn switch, unknown provider)
+                // surface here with their real message.
+                if let Some(state) = self.state.as_mut() {
+                    state.record_error(format!("/provider failed: {e}"));
+                }
+            }
+        }
     }
 
     async fn destroy_focused(&mut self) {
@@ -1707,6 +1756,7 @@ mod tests {
             scopes: vec![],
             protocol_version: Some(1),
             capabilities: None,
+            providers: None,
         });
         state.sessions.upsert(SessionInfo {
             id: "s1".into(),
@@ -1726,6 +1776,7 @@ mod tests {
             queued_messages: None,
             model: None,
             fallback_model: None,
+            provider_id: None,
         });
         state
     }

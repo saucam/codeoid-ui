@@ -107,6 +107,7 @@ fn sample_session_info() -> SessionInfo {
         queued_messages: Some(0),
         model: Some("claude-opus-4-7".into()),
         fallback_model: None,
+        provider_id: None,
     }
 }
 
@@ -167,6 +168,7 @@ fn client_messages_are_camel_case_on_wire() {
                 id: "1".into(),
                 name: "n".into(),
                 workdir: "/".into(),
+                provider_id: Some("pi".into()),
             },
         ),
         ("SessionList", ClientMessage::SessionList { id: "1".into() }),
@@ -294,6 +296,14 @@ fn client_messages_are_camel_case_on_wire() {
             },
         ),
         (
+            "SessionSetProvider",
+            ClientMessage::SessionSetProvider {
+                id: "1".into(),
+                session_id: "s".into(),
+                provider_id: "pi".into(),
+            },
+        ),
+        (
             "SessionSetModel",
             ClientMessage::SessionSetModel {
                 id: "1".into(),
@@ -328,6 +338,7 @@ fn daemon_messages_are_camel_case_on_wire() {
                 scopes: vec!["session:list".into()],
                 protocol_version: Some(1),
                 capabilities: Some(vec!["commands.dynamic".into(), "ui.dialogs".into()]),
+                providers: None,
             }),
         ),
         (

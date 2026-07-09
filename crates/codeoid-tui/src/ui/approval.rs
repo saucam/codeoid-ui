@@ -269,6 +269,7 @@ mod tests {
             scopes: vec![],
             protocol_version: Some(1),
             capabilities: None,
+            providers: None,
         });
         state.sessions.upsert(SessionInfo {
             id: "s1".into(),
@@ -288,6 +289,7 @@ mod tests {
             queued_messages: None,
             model: None,
             fallback_model: None,
+            provider_id: None,
         });
         let mut m = msg(
             MessageRole::ToolCall,

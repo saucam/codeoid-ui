@@ -659,6 +659,7 @@ mod tests {
             scopes: vec![],
             protocol_version: Some(1),
             capabilities: None,
+            providers: None,
         })
     }
 

@@ -8,6 +8,15 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Multi-provider sessions** (pairs with the daemon's pi backend +
+  mid-session switching): `/new <name> [workdir] --provider <id>` creates a
+  session on a specific backend, `/provider <id>` switches the focused
+  session mid-conversation (daemon rejections like mid-turn switches
+  surface in the error line), and the transcript header tags non-default
+  backends. Protocol: `session.create.providerId`,
+  `session.set_provider`, `SessionInfo.providerId`, and
+  `AuthOkMsg.providers` (default first).
+
 - **Provider extension surface** (pairs with the daemon's
   provider-extension-surface release) — the TUI now renders what non-Claude
   backends expose through codeoid:

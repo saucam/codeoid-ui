@@ -127,6 +127,7 @@ mod tests {
             queued_messages: None,
             model: None,
             fallback_model: None,
+            provider_id: None,
         }
     }
 

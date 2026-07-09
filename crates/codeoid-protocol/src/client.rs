@@ -26,6 +26,10 @@ pub enum ClientMessage {
         id: String,
         name: String,
         workdir: String,
+        /// Backend for the session (one of `AuthOkMsg.providers`). The
+        /// daemon fail-closes on unknown ids. Absent = daemon default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_id: Option<String>,
     },
 
     #[serde(rename = "session.list", rename_all = "camelCase")]
@@ -149,6 +153,17 @@ pub enum ClientMessage {
         limit: Option<u32>,
     },
 
+    /// Switch a live session's BACKEND (claude ⇄ pi …). The session id,
+    /// scrollback, and transcript stay; the daemon carries the history to
+    /// the new backend as a transcript and resets the model to its default.
+    /// Rejected mid-turn and on unknown ids.
+    #[serde(rename = "session.set_provider", rename_all = "camelCase")]
+    SessionSetProvider {
+        id: String,
+        session_id: String,
+        provider_id: String,
+    },
+
     #[serde(rename = "session.set_model", rename_all = "camelCase")]
     SessionSetModel {
         id: String,
@@ -231,6 +246,7 @@ impl ClientMessage {
             | Self::SessionUnpin { id, .. }
             | Self::SessionRotate { id, .. }
             | Self::SessionSearch { id, .. }
+            | Self::SessionSetProvider { id, .. }
             | Self::SessionSetModel { id, .. }
             | Self::SessionRename { id, .. }
             | Self::ClaudeConfig { id, .. }

@@ -324,6 +324,17 @@ fn session_title(session: &SessionInfo) -> Line<'static> {
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
         ),
+        // Non-default backend gets a visible tag — a mixed claude/pi fleet
+        // must be tellable apart from the transcript header alone.
+        Span::styled(
+            match session.provider_id.as_deref() {
+                Some(provider) if provider != "claude" => format!("  · {provider}"),
+                _ => String::new(),
+            },
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" "),
     ])
 }
@@ -566,6 +577,7 @@ mod tests {
             scopes: vec![],
             protocol_version: Some(1),
             capabilities: None,
+            providers: None,
         })
     }
 
@@ -588,6 +600,7 @@ mod tests {
             queued_messages: None,
             model: None,
             fallback_model: None,
+            provider_id: None,
         }
     }
 
