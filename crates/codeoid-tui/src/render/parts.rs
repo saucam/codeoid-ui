@@ -369,4 +369,84 @@ mod tests {
         // header + rule + 2 rows
         assert_eq!(out.len(), 4);
     }
+
+    #[test]
+    fn renders_markdown_text_file_refs_trees_and_images() {
+        let parts = vec![
+            ContentPart::Text {
+                text: "# Heading\n\nbody".into(),
+                markdown: None, // default = markdown
+            },
+            ContentPart::FileRef {
+                path: "src/lib.rs".into(),
+                lines: Some([10, 20]),
+                change: Some(codeoid_protocol::message::FileChange {
+                    added: 4,
+                    removed: 2,
+                }),
+            },
+            ContentPart::Tree {
+                label: "workspace".into(),
+                children: vec![TreeNode {
+                    label: "crates".into(),
+                    kind: codeoid_protocol::message::TreeNodeType::Directory,
+                    path: None,
+                    children: Some(vec![TreeNode {
+                        label: "lib.rs".into(),
+                        kind: codeoid_protocol::message::TreeNodeType::File,
+                        path: None,
+                        children: None,
+                    }]),
+                }],
+            },
+            ContentPart::Image {
+                url: "https://example.com/x.png".into(),
+                alt: None,
+            },
+            ContentPart::Progress {
+                message: "waiting".into(),
+                percent: None, // indeterminate branch
+                elapsed_ms: None,
+            },
+            ContentPart::Button {
+                label: "Danger".into(),
+                action: "rm".into(),
+                data: None,
+                style: Some(codeoid_protocol::message::ButtonStyle::Danger),
+            },
+        ];
+        let lines = render_parts(&parts, "  ");
+        let flat: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.clone()))
+            .collect();
+        assert!(flat.contains("Heading"));
+        assert!(flat.contains("src/lib.rs"));
+        assert!(flat.contains(":10–20"));
+        assert!(flat.contains("+4"));
+        assert!(flat.contains("workspace"));
+        assert!(flat.contains("crates"));
+        assert!(flat.contains("lib.rs"));
+        assert!(flat.contains("https://example.com/x.png"));
+        assert!(
+            flat.contains("image"),
+            "alt-less image gets a generic label"
+        );
+        assert!(flat.contains("waiting"));
+        assert!(flat.contains("[ Danger ]"));
+    }
+
+    #[test]
+    fn unknown_kinds_render_nothing_and_empty_tables_bail() {
+        // Deserialize an unknown kind through the wire sink.
+        let unknown: ContentPart =
+            serde_json::from_str(r#"{ "kind": "hologram", "payload": 1 }"#).unwrap();
+        assert!(render_parts(&[unknown], "  ").is_empty());
+
+        let empty_table = ContentPart::Table {
+            headers: vec![],
+            rows: vec![],
+        };
+        assert!(render_parts(&[empty_table], "  ").is_empty());
+    }
 }

@@ -219,3 +219,31 @@ fn session_ui_response_serializes_camel_case() {
     assert!(json.get("value").is_none());
     assert!(json.get("cancelled").is_none());
 }
+
+#[test]
+fn new_client_verbs_expose_their_request_id() {
+    use codeoid_protocol::ClientMessage;
+    let msgs = [
+        ClientMessage::SessionUiResponse {
+            id: "r1".into(),
+            session_id: "s".into(),
+            request_id: "u".into(),
+            value: None,
+            confirmed: None,
+            cancelled: Some(true),
+        },
+        ClientMessage::SessionPartAction {
+            id: "r2".into(),
+            session_id: "s".into(),
+            message_id: "m".into(),
+            action: "a".into(),
+            data: None,
+        },
+        ClientMessage::SessionCommands {
+            id: "r3".into(),
+            session_id: "s".into(),
+        },
+    ];
+    let ids: Vec<&str> = msgs.iter().map(ClientMessage::request_id).collect();
+    assert_eq!(ids, ["r1", "r2", "r3"]);
+}

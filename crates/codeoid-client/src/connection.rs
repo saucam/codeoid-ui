@@ -497,3 +497,73 @@ fn client_kind(msg: &ClientMessage) -> &'static str {
         ClientMessage::SessionImport { .. } => "session.import",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{client_kind, daemon_kind};
+    use codeoid_protocol::{ClientMessage, DaemonMessage, SessionUiRequestMsg, UiRequestMethod};
+
+    #[test]
+    fn kind_maps_cover_the_provider_extension_surface() {
+        let req = DaemonMessage::SessionUiRequest(SessionUiRequestMsg {
+            session_id: "s".into(),
+            request_id: "u".into(),
+            method: UiRequestMethod::Confirm,
+            title: "t".into(),
+            message: None,
+            options: None,
+            placeholder: None,
+            prefill: None,
+            timeout_ms: None,
+            timestamp: "t".into(),
+        });
+        assert_eq!(daemon_kind(&req), "session.ui_request");
+        assert_eq!(
+            daemon_kind(&DaemonMessage::SessionUiResolved {
+                session_id: "s".into(),
+                request_id: "u".into(),
+                reason: codeoid_protocol::UiResolvedReason::Timeout,
+                timestamp: "t".into(),
+            }),
+            "session.ui_resolved"
+        );
+        assert_eq!(
+            daemon_kind(&DaemonMessage::SessionCommandsResult {
+                request_id: "r".into(),
+                session_id: "s".into(),
+                provider_id: "pi".into(),
+                commands: vec![],
+            }),
+            "session.commands.result"
+        );
+
+        assert_eq!(
+            client_kind(&ClientMessage::SessionUiResponse {
+                id: "1".into(),
+                session_id: "s".into(),
+                request_id: "u".into(),
+                value: None,
+                confirmed: Some(false),
+                cancelled: None,
+            }),
+            "session.ui_response"
+        );
+        assert_eq!(
+            client_kind(&ClientMessage::SessionPartAction {
+                id: "1".into(),
+                session_id: "s".into(),
+                message_id: "m".into(),
+                action: "a".into(),
+                data: None,
+            }),
+            "session.part_action"
+        );
+        assert_eq!(
+            client_kind(&ClientMessage::SessionCommands {
+                id: "1".into(),
+                session_id: "s".into(),
+            }),
+            "session.commands"
+        );
+    }
+}

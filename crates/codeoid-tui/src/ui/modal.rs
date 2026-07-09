@@ -637,3 +637,103 @@ fn render_ask_user_question(frame: &mut Frame<'_>, area: Rect, m: &AskUserQuesti
     );
     frame.render_widget(p, area);
 }
+
+#[cfg(test)]
+mod tests {
+    use codeoid_protocol::{
+        AuthOkMsg, IdentityType, MessageIdentity, SessionUiRequestMsg, UiRequestMethod,
+    };
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Cell;
+    use ratatui::Terminal;
+
+    use crate::state::{AppState, Modal, UiDialogModal};
+
+    fn mk_state() -> AppState {
+        AppState::new(AuthOkMsg {
+            identity: MessageIdentity {
+                sub: "spiffe://x".into(),
+                name: Some("Me".into()),
+                kind: IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+            capabilities: None,
+        })
+    }
+
+    fn mk_request(method: UiRequestMethod) -> SessionUiRequestMsg {
+        SessionUiRequestMsg {
+            session_id: "s1".into(),
+            request_id: "u1".into(),
+            method,
+            title: "Extension asks".into(),
+            message: Some("Please decide.".into()),
+            options: Some(vec!["Allow".into(), "Block".into()]),
+            placeholder: Some("type here".into()),
+            prefill: None,
+            timeout_ms: None,
+            timestamp: "t".into(),
+        }
+    }
+
+    fn render_to_text(state: &mut AppState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| super::render(f, state)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(Cell::symbol)
+            .collect()
+    }
+
+    #[test]
+    fn select_dialog_renders_options_cursor_and_hints() {
+        let mut state = mk_state();
+        let mut modal = UiDialogModal::new(mk_request(UiRequestMethod::Select));
+        modal.selected = 1;
+        state.modal = Some(Modal::UiDialog(modal));
+        let text = render_to_text(&mut state);
+        assert!(text.contains("Extension asks"), "{text}");
+        assert!(text.contains("Please decide."), "{text}");
+        assert!(text.contains("1. Allow"), "{text}");
+        assert!(text.contains("▶ 2. Block"), "{text}");
+        assert!(text.contains("Enter submit"), "{text}");
+    }
+
+    #[test]
+    fn confirm_dialog_renders_yn_hints_and_countdown_title() {
+        let mut state = mk_state();
+        let mut req = mk_request(UiRequestMethod::Confirm);
+        req.timeout_ms = Some(30_000);
+        state.modal = Some(Modal::UiDialog(UiDialogModal::new(req)));
+        let text = render_to_text(&mut state);
+        assert!(text.contains("y yes"), "{text}");
+        assert!(text.contains("auto-cancels in 30s"), "{text}");
+    }
+
+    #[test]
+    fn input_dialog_shows_placeholder_until_typed() {
+        let mut state = mk_state();
+        state.modal = Some(Modal::UiDialog(UiDialogModal::new(mk_request(
+            UiRequestMethod::Input,
+        ))));
+        let text = render_to_text(&mut state);
+        assert!(text.contains("type here"), "{text}");
+        assert!(text.contains("Enter submit"), "{text}");
+    }
+
+    #[test]
+    fn editor_dialog_renders_multiline_prefill_with_cursor() {
+        let mut state = mk_state();
+        let mut req = mk_request(UiRequestMethod::Editor);
+        req.prefill = Some("line one\nline two".into());
+        req.placeholder = None;
+        state.modal = Some(Modal::UiDialog(UiDialogModal::new(req)));
+        let text = render_to_text(&mut state);
+        assert!(text.contains("line one"), "{text}");
+        assert!(text.contains("line two█"), "{text}");
+    }
+}
