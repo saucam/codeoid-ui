@@ -861,4 +861,26 @@ mod tests {
             "the latest line must be off-screen when scrolled to the top"
         );
     }
+
+    #[test]
+    fn session_title_tags_non_default_backends() {
+        let mut session = mk_session("s1");
+        session.provider_id = Some("pi".into());
+        let title: String = session_title(&session)
+            .spans
+            .iter()
+            .map(|sp| sp.content.clone().into_owned())
+            .collect();
+        assert!(title.contains("· pi"), "{title}");
+
+        // The default backend stays untagged — chips are for the exceptions.
+        let mut session = mk_session("s2");
+        session.provider_id = Some("claude".into());
+        let title: String = session_title(&session)
+            .spans
+            .iter()
+            .map(|sp| sp.content.clone().into_owned())
+            .collect();
+        assert!(!title.contains("claude"), "{title}");
+    }
 }

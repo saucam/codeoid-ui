@@ -566,5 +566,13 @@ mod tests {
             }),
             "session.commands"
         );
+        assert_eq!(
+            client_kind(&ClientMessage::SessionSetProvider {
+                id: "1".into(),
+                session_id: "s".into(),
+                provider_id: "pi".into(),
+            }),
+            "session.set_provider"
+        );
     }
 }

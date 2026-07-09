@@ -1199,13 +1199,12 @@ impl App {
         let Some(handle) = self.handle.clone() else {
             return;
         };
-        let id = ClientHandle::next_request_id();
-        let msg = ClientMessage::SessionCreate {
-            id,
-            name: name.clone(),
-            workdir: resolved_workdir.clone(),
+        let msg = session_create_message(
+            ClientHandle::next_request_id(),
+            name.clone(),
+            resolved_workdir.clone(),
             provider_id,
-        };
+        );
         if let Err(e) = handle.send(msg).await {
             if let Some(state) = self.state.as_mut() {
                 state.record_error(format!("create-session failed: {e}"));
@@ -1240,11 +1239,11 @@ impl App {
         let Some(handle) = self.handle.clone() else {
             return;
         };
-        let msg = ClientMessage::SessionSetProvider {
-            id: ClientHandle::next_request_id(),
+        let msg = set_provider_message(
+            ClientHandle::next_request_id(),
             session_id,
-            provider_id: provider_id.clone(),
-        };
+            provider_id.clone(),
+        );
         match handle.request_ok(msg).await {
             Ok(_) => {
                 if let Some(state) = self.state.as_mut() {
@@ -1735,6 +1734,31 @@ fn find_latest_approval(state: &AppState, session_id: &str) -> Option<String> {
         .next()
 }
 
+/// Pure `session.create` frame builder — split from the async send path so
+/// the wire shape (esp. the optional providerId) is unit-testable.
+fn session_create_message(
+    id: String,
+    name: String,
+    workdir: String,
+    provider_id: Option<String>,
+) -> ClientMessage {
+    ClientMessage::SessionCreate {
+        id,
+        name,
+        workdir,
+        provider_id,
+    }
+}
+
+/// Pure `session.set_provider` frame builder (see `session_create_message`).
+fn set_provider_message(id: String, session_id: String, provider_id: String) -> ClientMessage {
+    ClientMessage::SessionSetProvider {
+        id,
+        session_id,
+        provider_id,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use codeoid_protocol::{
@@ -2015,5 +2039,70 @@ mod tests {
             .last_error
             .as_deref()
             .is_some_and(|e| e.contains("nonsense")));
+    }
+
+    #[test]
+    fn message_builders_produce_the_wire_shapes() {
+        let create =
+            session_create_message("r1".into(), "demo".into(), "/w".into(), Some("pi".into()));
+        let json = serde_json::to_value(&create).unwrap();
+        assert_eq!(json["type"], "session.create");
+        assert_eq!(json["providerId"], "pi");
+
+        // No provider → field entirely absent (daemon default applies).
+        let plain = session_create_message("r2".into(), "demo".into(), "/w".into(), None);
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("providerId").is_none());
+
+        let switch = set_provider_message("r3".into(), "s1".into(), "pi".into());
+        let json = serde_json::to_value(&switch).unwrap();
+        assert_eq!(json["type"], "session.set_provider");
+        assert_eq!(json["sessionId"], "s1");
+        assert_eq!(json["providerId"], "pi");
+    }
+
+    #[tokio::test]
+    async fn set_provider_requires_a_focused_session() {
+        let mut app = App::new("ws://test".into(), "tok".into());
+        app.state = Some(AppState::new(codeoid_protocol::AuthOkMsg {
+            identity: codeoid_protocol::MessageIdentity {
+                sub: "u".into(),
+                name: None,
+                kind: codeoid_protocol::IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+            capabilities: None,
+            providers: Some(vec!["claude".into(), "pi".into()]),
+        }));
+        app.set_provider("pi".into()).await;
+        assert!(app
+            .state
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("no session focused")));
+    }
+
+    #[tokio::test]
+    async fn provider_slash_commands_route_without_a_connection() {
+        // With a focused session but no live handle, both paths return
+        // cleanly (guard-path coverage; the wire shapes are unit-tested
+        // above, and the daemon behavior in codeoid's own suite).
+        let mut app = mk_app();
+        app.state
+            .as_mut()
+            .unwrap()
+            .prompt
+            .insert_str("/provider pi");
+        app.submit_prompt().await;
+        app.state
+            .as_mut()
+            .unwrap()
+            .prompt
+            .insert_str("/new demo --provider pi");
+        app.submit_prompt().await;
+        assert!(app.pending_sends.is_empty(), "no handle — nothing queued");
     }
 }
