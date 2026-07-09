@@ -206,6 +206,12 @@ impl App {
                     Some(crate::state::Modal::AskUserQuestion(_)) => {
                         crate::keymap::ModalKind::AskUserQuestion
                     }
+                    Some(crate::state::Modal::UiDialog(m)) if m.is_text_entry() => {
+                        crate::keymap::ModalKind::UiDialogText
+                    }
+                    Some(crate::state::Modal::UiDialog(_)) => {
+                        crate::keymap::ModalKind::UiDialogChoice
+                    }
                     Some(_) => crate::keymap::ModalKind::Generic,
                     None => crate::keymap::ModalKind::None,
                 };
@@ -235,6 +241,17 @@ impl App {
 
                 if let Some(action) = action {
                     self.apply_action(action).await;
+                } else if matches!(modal_kind, crate::keymap::ModalKind::UiDialogText) {
+                    // Unbound keys edit the dialog's text buffer.
+                    if let Some(Modal::UiDialog(m)) = state.modal.as_mut() {
+                        match key.code {
+                            crossterm::event::KeyCode::Char(c) => m.buffer.push(c),
+                            crossterm::event::KeyCode::Backspace => {
+                                m.buffer.pop();
+                            }
+                            _ => {}
+                        }
+                    }
                 } else if prompt_focused && !modal_open {
                     // Anything keymap didn't handle goes straight to the
                     // TextArea — arrows, Home/End, Ctrl+A/E, word-delete,
@@ -243,7 +260,11 @@ impl App {
                 }
             }
             AppEvent::Terminal(CtEvent::Paste(text)) => {
-                if state.focus == Focus::Prompt && state.modal.is_none() {
+                if let Some(Modal::UiDialog(m)) = state.modal.as_mut() {
+                    if m.is_text_entry() {
+                        m.buffer.push_str(&text);
+                    }
+                } else if state.focus == Focus::Prompt && state.modal.is_none() {
                     state.prompt.insert_str(&text);
                 }
             }
@@ -285,11 +306,13 @@ impl App {
                 state.sessions.focus_next();
                 state.scroll_to_bottom();
                 self.ensure_attached().await;
+                self.on_focus_changed().await;
             }
             Action::PrevSession => {
                 state.sessions.focus_prev();
                 state.scroll_to_bottom();
                 self.ensure_attached().await;
+                self.on_focus_changed().await;
             }
             Action::Interrupt => self.interrupt().await,
             Action::Approve => self.approve(true).await,
@@ -342,7 +365,162 @@ impl App {
             }
             Action::AskSubmit => self.submit_ask_user_question().await,
             Action::AskCancel => self.cancel_ask_user_question().await,
+            Action::UiDialogNext => {
+                if let Some(Modal::UiDialog(m)) = state.modal.as_mut() {
+                    m.next_option();
+                }
+            }
+            Action::UiDialogPrev => {
+                if let Some(Modal::UiDialog(m)) = state.modal.as_mut() {
+                    m.prev_option();
+                }
+            }
+            Action::UiDialogPick(n) => {
+                let picked = if let Some(Modal::UiDialog(m)) = state.modal.as_mut() {
+                    let len = m.request.options.as_ref().map_or(0, Vec::len);
+                    let idx = (n as usize).saturating_sub(1);
+                    if idx < len {
+                        m.selected = idx;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if picked {
+                    self.submit_ui_dialog().await;
+                }
+            }
+            Action::UiDialogYes => self.answer_ui_dialog_confirm(true).await,
+            Action::UiDialogNo => self.answer_ui_dialog_confirm(false).await,
+            Action::UiDialogSubmit => self.submit_ui_dialog().await,
+            Action::UiDialogCancel => self.cancel_ui_dialog().await,
         }
+    }
+
+    /// Submit the open UiDialog with its method-appropriate payload.
+    async fn submit_ui_dialog(&mut self) {
+        use codeoid_protocol::UiRequestMethod;
+        let payload = {
+            let Some(state) = self.state.as_ref() else {
+                return;
+            };
+            let Some(Modal::UiDialog(m)) = state.modal.as_ref() else {
+                return;
+            };
+            match m.request.method {
+                UiRequestMethod::Select => {
+                    let Some(value) = m.selected_option() else {
+                        return; // empty options list — nothing to submit
+                    };
+                    (Some(value.to_string()), None)
+                }
+                UiRequestMethod::Confirm => (None, Some(true)),
+                UiRequestMethod::Input | UiRequestMethod::Editor => (Some(m.buffer.clone()), None),
+            }
+        };
+        self.respond_ui_dialog(payload.0, payload.1, false).await;
+    }
+
+    /// Answer a confirm dialog (`y` / `n`). No-op for other methods so the
+    /// keys can't accidentally answer a select.
+    async fn answer_ui_dialog_confirm(&mut self, confirmed: bool) {
+        use codeoid_protocol::UiRequestMethod;
+        let is_confirm = self.state.as_ref().is_some_and(|s| {
+            matches!(
+                s.modal.as_ref(),
+                Some(Modal::UiDialog(m)) if m.request.method == UiRequestMethod::Confirm
+            )
+        });
+        if is_confirm {
+            self.respond_ui_dialog(None, Some(confirmed), false).await;
+        }
+    }
+
+    async fn cancel_ui_dialog(&mut self) {
+        self.respond_ui_dialog(None, None, true).await;
+    }
+
+    /// Ship a `session.ui_response` for the open dialog, close the modal,
+    /// and surface the next pending dialog (if any). The daemon's
+    /// `session.ui_resolved` broadcast is the authoritative cleanup for the
+    /// pending list — we drop our copy optimistically.
+    async fn respond_ui_dialog(
+        &mut self,
+        value: Option<String>,
+        confirmed: Option<bool>,
+        cancelled: bool,
+    ) {
+        let ids = {
+            let Some(state) = self.state.as_mut() else {
+                return;
+            };
+            let Some(Modal::UiDialog(m)) = state.modal.as_ref() else {
+                return;
+            };
+            let ids = (m.request.session_id.clone(), m.request.request_id.clone());
+            state.remove_ui_request(&ids.0, &ids.1);
+            state.maybe_open_ui_dialog();
+            ids
+        };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
+        let (session_id, request_id) = ids;
+        let id = ClientHandle::next_request_id();
+        if let Err(e) = handle
+            .send(ClientMessage::SessionUiResponse {
+                id,
+                session_id,
+                request_id,
+                value,
+                confirmed,
+                cancelled: cancelled.then_some(true),
+            })
+            .await
+        {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error(format!("dialog response failed: {e}"));
+            }
+        }
+    }
+
+    /// Focus moved to a (possibly different) session: fetch its provider
+    /// commands and surface its oldest pending dialog if no modal is up.
+    async fn on_focus_changed(&mut self) {
+        self.maybe_fetch_commands().await;
+        if let Some(state) = self.state.as_mut() {
+            state.maybe_open_ui_dialog();
+        }
+    }
+
+    /// Fetch the focused session's provider-command catalog once per
+    /// connection. Older daemons reject the verb — the error path records
+    /// nothing and the catalog stays empty.
+    async fn maybe_fetch_commands(&mut self) {
+        let request = {
+            let Some(state) = self.state.as_mut() else {
+                return;
+            };
+            let Some(session_id) = state.sessions.focused().map(|s| s.id.clone()) else {
+                return;
+            };
+            if !state.commands_requested.insert(session_id.clone()) {
+                return;
+            }
+            session_id
+        };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
+        let id = ClientHandle::next_request_id();
+        let _ = handle
+            .send(ClientMessage::SessionCommands {
+                id,
+                session_id: request,
+            })
+            .await;
     }
 
     async fn submit_ask_user_question(&mut self) {
@@ -589,6 +767,33 @@ impl App {
                     }
                 }
             }
+            DaemonMessage::SessionUiRequest(req) => {
+                state.add_ui_request(req);
+                state.maybe_open_ui_dialog();
+            }
+            DaemonMessage::SessionUiResolved {
+                session_id,
+                request_id,
+                ..
+            } => {
+                // Authoritative dismiss — fires whether WE answered, another
+                // client did, the request timed out, or the turn was
+                // interrupted. Surface the next pending dialog if any.
+                state.remove_ui_request(&session_id, &request_id);
+                state.maybe_open_ui_dialog();
+            }
+            DaemonMessage::SessionCommandsResult {
+                session_id,
+                commands,
+                ..
+            } => {
+                debug!(
+                    session = %session_id,
+                    count = commands.len(),
+                    "provider command catalog received"
+                );
+                state.provider_commands.insert(session_id, commands);
+            }
             DaemonMessage::Unknown => {
                 warn!("received unknown daemon message; forward-compat drop");
             }
@@ -605,6 +810,11 @@ impl App {
         // Always clear attach ledger on new connection — the daemon has
         // zero state about us.
         state.attached.clear();
+        // Same for the fetch-once command ledger and pending dialogs: the
+        // daemon re-sends pending ui_requests on attach, and catalogs may
+        // have changed while we were away.
+        state.commands_requested.clear();
+        state.pending_ui_requests.clear();
         self.handle = Some(connected.handle);
         self.daemon_events = Some(connected.events);
     }
@@ -698,6 +908,17 @@ impl App {
             Ok(Some(cmd)) => {
                 self.dispatch_slash_command(cmd).await;
                 return;
+            }
+            Err(commands::ParseError::Unknown(verb))
+                if self
+                    .state
+                    .as_ref()
+                    .is_some_and(|s| s.is_provider_command(&verb)) =>
+            {
+                // Provider command (pi extension / prompt template / skill,
+                // from the session.commands catalog): not a client verb —
+                // fall through and send the raw text so the provider
+                // expands it.
             }
             Err(e) => {
                 if let Some(state) = self.state.as_mut() {
@@ -1184,6 +1405,9 @@ impl App {
             return;
         };
         self.attach_if_needed(id).await;
+        // Attach is the "user is now looking at this session" signal — the
+        // right moment to (once) pull its provider-command catalog.
+        self.maybe_fetch_commands().await;
     }
 
     /// Ensure `session.attach` has been enqueued to the daemon for this

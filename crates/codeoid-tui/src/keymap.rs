@@ -54,6 +54,22 @@ pub enum Action {
     /// Expand or collapse the currently selected tool block (or the most
     /// recent one if no selection). Bound to `Enter` in transcript focus.
     ToggleExpandSelectedToolBlock,
+    /// UiDialog modal: move the select-method cursor down (wraps).
+    UiDialogNext,
+    /// UiDialog modal: move the select-method cursor up (wraps).
+    UiDialogPrev,
+    /// UiDialog modal: jump the select cursor to option N (1-based) and
+    /// submit it — number keys are the fast path for short lists.
+    UiDialogPick(u8),
+    /// UiDialog modal: answer a confirm dialog with yes.
+    UiDialogYes,
+    /// UiDialog modal: answer a confirm dialog with no.
+    UiDialogNo,
+    /// UiDialog modal: submit (selected option / typed text).
+    UiDialogSubmit,
+    /// UiDialog modal: dismiss — sends `cancelled: true` so the provider
+    /// unblocks with "no answer" rather than waiting forever.
+    UiDialogCancel,
 }
 
 /// What kind of modal is currently open. The AskUserQuestion form needs
@@ -65,6 +81,13 @@ pub enum ModalKind {
     None,
     Generic,
     AskUserQuestion,
+    /// Provider dialog with choice-style interaction (select / confirm) —
+    /// arrows, digits, y/n, Enter, Esc are bound; the rest is absorbed.
+    UiDialogChoice,
+    /// Provider dialog with text entry (input / editor) — only Enter, Esc,
+    /// and Ctrl+C are bound; every other key falls through to the app
+    /// reducer, which feeds it into the dialog's text buffer.
+    UiDialogText,
 }
 
 pub fn resolve(
@@ -91,6 +114,34 @@ pub fn resolve(
             (Char(c @ '1'..='9'), KeyModifiers::NONE) => {
                 Some(Action::AskToggleOption((c as u8) - b'0'))
             }
+            _ => None,
+        };
+    }
+
+    // Provider dialog, choice interaction (select / confirm).
+    if matches!(modal_kind, ModalKind::UiDialogChoice) {
+        return match (event.code, event.modifiers) {
+            (Esc, _) => Some(Action::UiDialogCancel),
+            (Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
+            (Enter, _) => Some(Action::UiDialogSubmit),
+            (Down, _) | (Tab, _) | (Char('j'), _) => Some(Action::UiDialogNext),
+            (Up, _) | (BackTab, _) | (Char('k'), _) => Some(Action::UiDialogPrev),
+            (Char('y'), KeyModifiers::NONE) => Some(Action::UiDialogYes),
+            (Char('n'), KeyModifiers::NONE) => Some(Action::UiDialogNo),
+            (Char(c @ '1'..='9'), KeyModifiers::NONE) => {
+                Some(Action::UiDialogPick((c as u8) - b'0'))
+            }
+            _ => None,
+        };
+    }
+
+    // Provider dialog, text entry (input / editor). Everything unbound
+    // falls through so the reducer can feed chars into the buffer.
+    if matches!(modal_kind, ModalKind::UiDialogText) {
+        return match (event.code, event.modifiers) {
+            (Esc, _) => Some(Action::UiDialogCancel),
+            (Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
+            (Enter, _) => Some(Action::UiDialogSubmit),
             _ => None,
         };
     }
@@ -508,5 +559,68 @@ mod tests {
             resolve(key(KeyCode::Char('k')), false, ModalKind::None, false),
             Some(Action::ScrollUp)
         );
+    }
+
+    // ------------ provider-dialog modals ------------
+
+    #[test]
+    fn ui_dialog_choice_binds_navigation_confirm_and_pick() {
+        let k = ModalKind::UiDialogChoice;
+        assert_eq!(
+            resolve(key(KeyCode::Esc), false, k, false),
+            Some(Action::UiDialogCancel)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Enter), false, k, false),
+            Some(Action::UiDialogSubmit)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Down), false, k, false),
+            Some(Action::UiDialogNext)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Up), false, k, false),
+            Some(Action::UiDialogPrev)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('y')), false, k, false),
+            Some(Action::UiDialogYes)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('n')), false, k, false),
+            Some(Action::UiDialogNo)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('2')), false, k, false),
+            Some(Action::UiDialogPick(2))
+        );
+        assert_eq!(
+            resolve(ctrl(KeyCode::Char('c')), false, k, false),
+            Some(Action::Quit)
+        );
+        // Unbound letters are absorbed (None) — no leak into nav actions.
+        assert_eq!(resolve(key(KeyCode::Char('q')), false, k, false), None);
+    }
+
+    #[test]
+    fn ui_dialog_text_binds_only_submit_cancel_quit() {
+        let k = ModalKind::UiDialogText;
+        assert_eq!(
+            resolve(key(KeyCode::Esc), false, k, false),
+            Some(Action::UiDialogCancel)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Enter), false, k, false),
+            Some(Action::UiDialogSubmit)
+        );
+        assert_eq!(
+            resolve(ctrl(KeyCode::Char('c')), false, k, false),
+            Some(Action::Quit)
+        );
+        // Everything else falls through so the reducer feeds the buffer —
+        // including y/n/digits, which are regular typing here.
+        assert_eq!(resolve(key(KeyCode::Char('y')), false, k, false), None);
+        assert_eq!(resolve(key(KeyCode::Char('3')), false, k, false), None);
+        assert_eq!(resolve(key(KeyCode::Backspace), false, k, false), None);
     }
 }

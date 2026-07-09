@@ -70,6 +70,44 @@ pub enum ClientMessage {
         updated_input: Option<serde_json::Value>,
     },
 
+    /// Answer a provider-initiated dialog
+    /// ([`DaemonMessage::SessionUiRequest`](crate::daemon::DaemonMessage::SessionUiRequest)).
+    /// Exactly one payload field applies per method: `value` for
+    /// select/input/editor, `confirmed` for confirm, `cancelled: true` to
+    /// dismiss any method. First answer wins; a late answer gets `not_found`
+    /// (the `session.ui_resolved` broadcast already dismissed it).
+    #[serde(rename = "session.ui_response", rename_all = "camelCase")]
+    SessionUiResponse {
+        id: String,
+        session_id: String,
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confirmed: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cancelled: Option<bool>,
+    },
+
+    /// Activate a `ContentPart::Button` from a message's `parts[]`. The
+    /// daemon validates the button exists on the real message before
+    /// forwarding to the provider.
+    #[serde(rename = "session.part_action", rename_all = "camelCase")]
+    SessionPartAction {
+        id: String,
+        session_id: String,
+        message_id: String,
+        action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<serde_json::Value>,
+    },
+
+    /// Fetch the session's provider-defined command catalog. Daemon answers
+    /// with [`DaemonMessage::SessionCommandsResult`](crate::daemon::DaemonMessage::SessionCommandsResult).
+    /// Gated on the daemon capability `commands.dynamic`.
+    #[serde(rename = "session.commands", rename_all = "camelCase")]
+    SessionCommands { id: String, session_id: String },
+
     #[serde(rename = "session.destroy", rename_all = "camelCase")]
     SessionDestroy { id: String, session_id: String },
 
@@ -184,6 +222,9 @@ impl ClientMessage {
             | Self::SessionSend { id, .. }
             | Self::SessionInterrupt { id, .. }
             | Self::SessionApprove { id, .. }
+            | Self::SessionUiResponse { id, .. }
+            | Self::SessionPartAction { id, .. }
+            | Self::SessionCommands { id, .. }
             | Self::SessionDestroy { id, .. }
             | Self::SessionSetMode { id, .. }
             | Self::SessionPin { id, .. }

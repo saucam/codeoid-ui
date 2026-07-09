@@ -268,6 +268,7 @@ mod tests {
             },
             scopes: vec![],
             protocol_version: Some(1),
+            capabilities: None,
         });
         state.sessions.upsert(SessionInfo {
             id: "s1".into(),

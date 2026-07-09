@@ -6,7 +6,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::state::{AppState, AskUserQuestionModal, CapabilitiesModal, CapabilitiesTab, Modal};
+use codeoid_protocol::UiRequestMethod;
+
+use crate::state::{
+    AppState, AskUserQuestionModal, CapabilitiesModal, CapabilitiesTab, Modal, UiDialogModal,
+};
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     // Signature matches the scope needed here; the rest of the tree can
@@ -27,7 +31,98 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         Modal::ConfirmDestroy { name, .. } => render_confirm_destroy(frame, area, name),
         Modal::Capabilities(c) => render_capabilities(frame, area, c),
         Modal::AskUserQuestion(m) => render_ask_user_question(frame, area, m),
+        Modal::UiDialog(m) => render_ui_dialog(frame, area, m),
     }
+}
+
+/// Provider-initiated dialog (`session.ui_request`) — select / confirm /
+/// input / editor. The daemon enforces the timeout; the header countdown is
+/// display only.
+fn render_ui_dialog(frame: &mut Frame<'_>, area: Rect, m: &UiDialogModal) {
+    let req = &m.request;
+    let mut rows: Vec<Line<'static>> = Vec::new();
+
+    if let Some(message) = &req.message {
+        rows.push(Line::from(Span::raw(message.clone())));
+        rows.push(Line::raw(""));
+    }
+
+    match req.method {
+        UiRequestMethod::Select => {
+            for (i, option) in req.options.iter().flatten().enumerate() {
+                let is_sel = i == m.selected;
+                let cursor = if is_sel { "▶ " } else { "  " };
+                let style = if is_sel {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                rows.push(Line::from(vec![
+                    Span::styled(cursor.to_string(), style),
+                    Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::DarkGray)),
+                    Span::styled(option.clone(), style),
+                ]));
+            }
+            rows.push(Line::raw(""));
+            rows.push(hint_line("↑↓ / 1-9 choose · Enter submit · Esc dismiss"));
+        }
+        UiRequestMethod::Confirm => {
+            rows.push(hint_line("y yes · n no · Esc dismiss"));
+        }
+        UiRequestMethod::Input | UiRequestMethod::Editor => {
+            if let Some(placeholder) = &req.placeholder {
+                if m.buffer.is_empty() {
+                    rows.push(Line::from(Span::styled(
+                        placeholder.clone(),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    )));
+                }
+            }
+            // Render the buffer with a block cursor at the end. Editor
+            // prefills can be multi-line; split so each line renders.
+            for (i, line) in m.buffer.split('\n').enumerate() {
+                let is_last = i == m.buffer.split('\n').count() - 1;
+                let mut spans = vec![Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Color::White),
+                )];
+                if is_last {
+                    spans.push(Span::styled("█", Style::default().fg(Color::Cyan)));
+                }
+                rows.push(Line::from(spans));
+            }
+            rows.push(Line::raw(""));
+            rows.push(hint_line("type to edit · Enter submit · Esc dismiss"));
+        }
+    }
+
+    let mut title = format!(" {} ", req.title);
+    if let Some(timeout_ms) = req.timeout_ms {
+        title = format!(" {} · auto-cancels in {}s ", req.title, timeout_ms / 1000);
+    }
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    frame.render_widget(
+        Paragraph::new(rows)
+            .block(block)
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        area,
+    );
+}
+
+fn hint_line(text: &'static str) -> Line<'static> {
+    Line::from(Span::styled(
+        text,
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    ))
 }
 
 fn centered(area: Rect, pct_x: u16, pct_y: u16) -> Rect {

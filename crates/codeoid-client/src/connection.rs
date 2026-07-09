@@ -133,10 +133,20 @@ pub async fn connect(url: &str, token: &str) -> Result<Connected> {
     let (write, read) = ws.split();
 
     // Step 1: send auth token as the first WS frame (TS client pattern).
+    // Declare what THIS client can consume — the daemon only targets
+    // capability-gated frames (session.ui_request) at connections that
+    // declared them, so omitting `ui.dialogs` here would silently disable
+    // provider dialogs for the TUI.
     let write = Arc::new(Mutex::new(write));
     {
         let mut w = write.lock().await;
-        let auth_frame = serde_json::json!({ "type": "auth", "token": token });
+        let auth_frame = serde_json::json!({
+            "type": "auth",
+            "token": token,
+            "protocolVersion": codeoid_protocol::PROTOCOL_VERSION,
+            "capabilities": ["parts", "ui.dialogs"],
+            "client": format!("codeoid-tui/{}", env!("CARGO_PKG_VERSION")),
+        });
         w.send(WsMessage::Text(auth_frame.to_string().into()))
             .await?;
     }
@@ -454,6 +464,9 @@ fn daemon_kind(msg: &DaemonMessage) -> &'static str {
         DaemonMessage::ClaudeConfigResult { .. } => "claude.config.result",
         DaemonMessage::SessionExportResult { .. } => "session.export.result",
         DaemonMessage::SessionImportResult { .. } => "session.import.result",
+        DaemonMessage::SessionUiRequest(_) => "session.ui_request",
+        DaemonMessage::SessionUiResolved { .. } => "session.ui_resolved",
+        DaemonMessage::SessionCommandsResult { .. } => "session.commands.result",
         DaemonMessage::Unknown => "unknown",
     }
 }
@@ -468,6 +481,9 @@ fn client_kind(msg: &ClientMessage) -> &'static str {
         ClientMessage::SessionSend { .. } => "session.send",
         ClientMessage::SessionInterrupt { .. } => "session.interrupt",
         ClientMessage::SessionApprove { .. } => "session.approve",
+        ClientMessage::SessionUiResponse { .. } => "session.ui_response",
+        ClientMessage::SessionPartAction { .. } => "session.part_action",
+        ClientMessage::SessionCommands { .. } => "session.commands",
         ClientMessage::SessionDestroy { .. } => "session.destroy",
         ClientMessage::SessionSetMode { .. } => "session.set_mode",
         ClientMessage::SessionPin { .. } => "session.pin",

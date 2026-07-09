@@ -43,7 +43,29 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
 fn build_palette(state: &AppState) -> Line<'static> {
     let query = state.command_query().unwrap_or("");
-    let matches = commands::filter_catalog(query);
+    // Built-ins first, then the focused session's provider commands
+    // (pi extensions, prompt templates, skills) — same prefix filter.
+    let mut matches: Vec<(String, String)> = commands::filter_catalog(query)
+        .into_iter()
+        .map(|(usage, desc)| ((*usage).to_string(), (*desc).to_string()))
+        .collect();
+    let query_lower = query.to_ascii_lowercase();
+    for cmd in state.focused_provider_commands() {
+        if !cmd.name.to_ascii_lowercase().starts_with(&query_lower) {
+            continue;
+        }
+        let usage = match &cmd.argument_hint {
+            Some(hint) => format!("/{} {hint}", cmd.name),
+            None => format!("/{}", cmd.name),
+        };
+        let desc = match (&cmd.description, &cmd.source) {
+            (Some(d), Some(s)) => format!("{d} ({s})"),
+            (Some(d), None) => d.clone(),
+            (None, Some(s)) => format!("provider command ({s})"),
+            (None, None) => "provider command".to_string(),
+        };
+        matches.push((usage, desc));
+    }
 
     if matches.is_empty() {
         return Line::from(vec![
@@ -81,7 +103,7 @@ fn build_palette(state: &AppState) -> Line<'static> {
             spans.push(Span::styled("  ·  ", Style::default().fg(Color::DarkGray)));
         }
         spans.push(Span::styled(
-            (*usage).to_string(),
+            usage.clone(),
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
