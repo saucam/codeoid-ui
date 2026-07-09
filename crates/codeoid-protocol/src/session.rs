@@ -78,6 +78,11 @@ pub struct SessionInfo {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_model: Option<String>,
+
+    /// Id of the provider backing this session (e.g. "claude", "pi").
+    /// Absent on daemons that predate multi-provider sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
 }
 
 /// Rotation telemetry — how many times the backing Claude Code session has

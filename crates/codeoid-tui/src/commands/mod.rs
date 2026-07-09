@@ -17,6 +17,9 @@ pub enum SlashCommand {
     New {
         name: String,
         workdir: Option<String>,
+        /// `--provider <id>` — backend for the new session (daemon default
+        /// when absent). Validated fail-closed by the daemon.
+        provider_id: Option<String>,
     },
     /// `/rename <new-name>` — rename the focused session. `new-name` may
     /// contain spaces; everything after the command is treated as the
@@ -36,6 +39,9 @@ pub enum SlashCommand {
     /// model; with none, list the available models. The value is validated
     /// against the fetched catalog by the reducer.
     Model(Option<String>),
+    /// `/provider <id>` — switch the focused session's backend mid-session
+    /// (claude ⇄ pi …). The daemon rejects unknown ids and mid-turn switches.
+    Provider(String),
     /// `/who` — show the authenticated ZeroID identity + scopes.
     Who,
     /// `/rotate` — rotate the backing Claude Code context.
@@ -88,6 +94,9 @@ pub enum ParseError {
 
     #[error("/import requires: /import <bundle.json> <target-workdir>")]
     ImportMissingArgs,
+
+    #[error("/provider requires a backend id (e.g. /provider pi); --provider requires an id")]
+    ProviderMissingId,
 }
 
 /// Attempt to parse `text` as a slash-command.
@@ -113,19 +122,44 @@ pub fn parse(text: &str) -> Result<Option<SlashCommand>, ParseError> {
 
     let cmd = match name.as_str() {
         "new" => {
-            let name = rest_of_line
+            // Extract a `--provider <id>` pair anywhere in the args before
+            // the positional name/workdir split, so paths with spaces keep
+            // working and the flag can trail or lead.
+            let mut provider_id: Option<String> = None;
+            let mut positional: Vec<&str> = Vec::new();
+            let mut tokens = rest_of_line.iter();
+            while let Some(token) = tokens.next() {
+                if *token == "--provider" {
+                    let id = tokens.next().ok_or(ParseError::ProviderMissingId)?;
+                    provider_id = Some(id.to_lowercase());
+                } else {
+                    positional.push(token);
+                }
+            }
+            let name = positional
                 .first()
                 .copied()
                 .ok_or(ParseError::NewMissingName)?
                 .to_string();
-            let workdir = rest_of_line.get(1..).and_then(|w| {
+            let workdir = positional.get(1..).and_then(|w| {
                 if w.is_empty() {
                     None
                 } else {
                     Some(w.join(" "))
                 }
             });
-            SlashCommand::New { name, workdir }
+            SlashCommand::New {
+                name,
+                workdir,
+                provider_id,
+            }
+        }
+        "provider" => {
+            let id = rest_of_line
+                .first()
+                .copied()
+                .ok_or(ParseError::ProviderMissingId)?;
+            SlashCommand::Provider(id.to_lowercase())
         }
         "rename" | "mv" => {
             // Everything after the command is the full name — users may
@@ -199,7 +233,14 @@ pub fn parse(text: &str) -> Result<Option<SlashCommand>, ParseError> {
 /// Static catalog — what the command palette displays. Keep in sync with
 /// the `parse` match arms above. Each entry is (`usage`, `description`).
 pub const CATALOG: &[(&str, &str)] = &[
-    ("/new <name> [workdir]", "create a new session"),
+    (
+        "/new <name> [workdir] [--provider <id>]",
+        "create a new session",
+    ),
+    (
+        "/provider <id>",
+        "switch the session's backend (claude, pi, …)",
+    ),
     ("/rename <new-name>", "rename the focused session"),
     ("/destroy", "destroy the focused session"),
     ("/interrupt", "stop the running agent"),
@@ -288,6 +329,7 @@ mod tests {
             Ok(Some(SlashCommand::New {
                 name: "demo".into(),
                 workdir: None,
+                provider_id: None,
             }))
         );
     }
@@ -299,6 +341,7 @@ mod tests {
             Ok(Some(SlashCommand::New {
                 name: "demo".into(),
                 workdir: Some("/tmp/foo".into()),
+                provider_id: None,
             }))
         );
     }
@@ -310,6 +353,7 @@ mod tests {
             Ok(Some(SlashCommand::New {
                 name: "demo".into(),
                 workdir: Some("/tmp/my dir".into()),
+                provider_id: None,
             }))
         );
     }
@@ -378,6 +422,7 @@ mod tests {
             Ok(Some(SlashCommand::New {
                 name: "demo".into(),
                 workdir: None,
+                provider_id: None,
             }))
         );
     }
@@ -486,5 +531,44 @@ mod tests {
     #[test]
     fn unique_completion_none_when_no_match() {
         assert_eq!(unique_completion("xzxzxz"), None);
+    }
+
+    #[test]
+    fn provider_command_parses_and_lowercases() {
+        assert_eq!(
+            parse("/provider PI"),
+            Ok(Some(SlashCommand::Provider("pi".into())))
+        );
+        assert_eq!(parse("/provider"), Err(ParseError::ProviderMissingId));
+    }
+
+    #[test]
+    fn new_accepts_a_provider_flag_anywhere() {
+        let expected = SlashCommand::New {
+            name: "demo".into(),
+            workdir: Some("/tmp/my dir".into()),
+            provider_id: Some("pi".into()),
+        };
+        assert_eq!(
+            parse("/new demo /tmp/my dir --provider pi"),
+            Ok(Some(expected.clone()))
+        );
+        assert_eq!(
+            parse("/new --provider PI demo /tmp/my dir"),
+            Ok(Some(expected))
+        );
+        assert_eq!(
+            parse("/new demo --provider"),
+            Err(ParseError::ProviderMissingId)
+        );
+        // No flag → daemon default.
+        assert_eq!(
+            parse("/new demo"),
+            Ok(Some(SlashCommand::New {
+                name: "demo".into(),
+                workdir: None,
+                provider_id: None,
+            }))
+        );
     }
 }

@@ -491,6 +491,7 @@ fn client_kind(msg: &ClientMessage) -> &'static str {
         ClientMessage::SessionRotate { .. } => "session.rotate",
         ClientMessage::SessionSearch { .. } => "session.search",
         ClientMessage::SessionSetModel { .. } => "session.set_model",
+        ClientMessage::SessionSetProvider { .. } => "session.set_provider",
         ClientMessage::SessionRename { .. } => "session.rename",
         ClientMessage::ClaudeConfig { .. } => "claude.config",
         ClientMessage::SessionExport { .. } => "session.export",
@@ -564,6 +565,14 @@ mod tests {
                 session_id: "s".into(),
             }),
             "session.commands"
+        );
+        assert_eq!(
+            client_kind(&ClientMessage::SessionSetProvider {
+                id: "1".into(),
+                session_id: "s".into(),
+                provider_id: "pi".into(),
+            }),
+            "session.set_provider"
         );
     }
 }

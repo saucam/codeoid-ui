@@ -247,3 +247,38 @@ fn new_client_verbs_expose_their_request_id() {
     let ids: Vec<&str> = msgs.iter().map(ClientMessage::request_id).collect();
     assert_eq!(ids, ["r1", "r2", "r3"]);
 }
+
+#[test]
+fn auth_ok_advertises_providers_default_first() {
+    let raw = r#"{
+        "type": "auth.ok",
+        "identity": { "sub": "s", "type": "human" },
+        "scopes": [],
+        "protocolVersion": 1,
+        "providers": ["claude", "gemini", "openai", "pi"]
+    }"#;
+    let msg: DaemonMessage = serde_json::from_str(raw).unwrap();
+    match msg {
+        DaemonMessage::AuthOk(ok) => {
+            let providers = ok.providers.expect("providers present");
+            assert_eq!(providers[0], "claude");
+            assert!(providers.contains(&"pi".to_string()));
+        }
+        _ => panic!("expected AuthOk"),
+    }
+}
+
+#[test]
+fn session_set_provider_serializes_camel_case() {
+    use codeoid_protocol::ClientMessage;
+    let msg = ClientMessage::SessionSetProvider {
+        id: "1".into(),
+        session_id: "s".into(),
+        provider_id: "pi".into(),
+    };
+    let json = serde_json::to_value(&msg).unwrap();
+    assert_eq!(json["type"], "session.set_provider");
+    assert_eq!(json["sessionId"], "s");
+    assert_eq!(json["providerId"], "pi");
+    assert_eq!(msg.request_id(), "1");
+}
