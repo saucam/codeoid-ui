@@ -217,6 +217,34 @@ fn client_messages_are_camel_case_on_wire() {
             },
         ),
         (
+            "SessionUiResponse",
+            ClientMessage::SessionUiResponse {
+                id: "1".into(),
+                session_id: "s".into(),
+                request_id: "u".into(),
+                value: Some("Allow".into()),
+                confirmed: Some(true),
+                cancelled: None,
+            },
+        ),
+        (
+            "SessionPartAction",
+            ClientMessage::SessionPartAction {
+                id: "1".into(),
+                session_id: "s".into(),
+                message_id: "m".into(),
+                action: "deploy".into(),
+                data: Some(serde_json::json!({"envName": "dev"})),
+            },
+        ),
+        (
+            "SessionCommands",
+            ClientMessage::SessionCommands {
+                id: "1".into(),
+                session_id: "s".into(),
+            },
+        ),
+        (
             "SessionDestroy",
             ClientMessage::SessionDestroy {
                 id: "1".into(),
@@ -299,7 +327,46 @@ fn daemon_messages_are_camel_case_on_wire() {
                 identity: sample_identity(),
                 scopes: vec!["session:list".into()],
                 protocol_version: Some(1),
+                capabilities: Some(vec!["commands.dynamic".into(), "ui.dialogs".into()]),
             }),
+        ),
+        (
+            "SessionUiRequest",
+            DaemonMessage::SessionUiRequest(codeoid_protocol::SessionUiRequestMsg {
+                session_id: "s".into(),
+                request_id: "u".into(),
+                method: codeoid_protocol::UiRequestMethod::Select,
+                title: "Pick one".into(),
+                message: Some("The extension wants an answer.".into()),
+                options: Some(vec!["a".into(), "b".into()]),
+                placeholder: Some("type here".into()),
+                prefill: Some("draft".into()),
+                timeout_ms: Some(30_000),
+                timestamp: "2026-04-22T00:00:00Z".into(),
+            }),
+        ),
+        (
+            "SessionUiResolved",
+            DaemonMessage::SessionUiResolved {
+                session_id: "s".into(),
+                request_id: "u".into(),
+                reason: codeoid_protocol::UiResolvedReason::Answered,
+                timestamp: "2026-04-22T00:00:00Z".into(),
+            },
+        ),
+        (
+            "SessionCommandsResult",
+            DaemonMessage::SessionCommandsResult {
+                request_id: "r".into(),
+                session_id: "s".into(),
+                provider_id: "pi".into(),
+                commands: vec![codeoid_protocol::ProviderCommand {
+                    name: "review".into(),
+                    description: Some("Review the diff".into()),
+                    source: Some("extension".into()),
+                    argument_hint: Some("<pattern>".into()),
+                }],
+            },
         ),
         (
             "ResponseOk",

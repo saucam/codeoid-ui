@@ -9,7 +9,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::render::{parse_ansi, render_markdown_block, render_tool_block, sanitize_for_display};
+use crate::render::{
+    has_rich_parts, parse_ansi, render_markdown_block, render_parts, render_tool_block,
+    sanitize_for_display,
+};
 use crate::state::{AppState, Focus};
 
 const BODY_INDENT: &str = "  ";
@@ -350,6 +353,19 @@ fn render_message(
     let mut out = Vec::new();
     out.push(role_header(m));
 
+    // Rich provider content (custom_message parts) wins over the plain
+    // `content` fallback — but never over tool chrome, which owns its own
+    // rendering. A single mirrored text part keeps the legacy paths (their
+    // markdown/ANSI handling is tuned per role).
+    if !matches!(m.role, MessageRole::ToolCall | MessageRole::ToolResult)
+        && has_rich_parts(m.parts.as_ref())
+    {
+        if let Some(parts) = &m.parts {
+            out.extend(render_parts(parts, BODY_INDENT));
+            return out;
+        }
+    }
+
     match m.role {
         MessageRole::ToolCall => {
             if let Some(tool) = &m.tool {
@@ -549,6 +565,7 @@ mod tests {
             },
             scopes: vec![],
             protocol_version: Some(1),
+            capabilities: None,
         })
     }
 

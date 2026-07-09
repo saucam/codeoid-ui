@@ -120,9 +120,102 @@ pub enum DaemonMessage {
         warnings: Vec<String>,
     },
 
+    /// Provider-initiated dialog (extension confirm gates, pick-one lists,
+    /// free text). Only sent to clients that declared the `ui.dialogs`
+    /// capability on their auth frame; answered with
+    /// [`ClientMessage::SessionUiResponse`](crate::client::ClientMessage::SessionUiResponse).
+    /// The daemon re-sends pending requests on attach and enforces
+    /// `timeout_ms` itself — clients only display the countdown.
+    #[serde(rename = "session.ui_request", rename_all = "camelCase")]
+    SessionUiRequest(SessionUiRequestMsg),
+
+    /// A dialog settled (answered here or elsewhere, timed out, or the turn
+    /// was interrupted). Dismiss the local copy; unknown reasons = dismiss.
+    #[serde(rename = "session.ui_resolved", rename_all = "camelCase")]
+    SessionUiResolved {
+        session_id: String,
+        request_id: String,
+        reason: UiResolvedReason,
+        timestamp: String,
+    },
+
+    /// Reply to `session.commands` — the backing provider's slash-command
+    /// catalog (extension commands, prompt templates, skills). Invoke by
+    /// sending `"/name args"` as plain `session.send` text.
+    #[serde(rename = "session.commands.result", rename_all = "camelCase")]
+    SessionCommandsResult {
+        request_id: String,
+        session_id: String,
+        provider_id: String,
+        commands: Vec<ProviderCommand>,
+    },
+
     /// Forward-compat sink. Preserves raw JSON so the TUI can log it.
     #[serde(other)]
     Unknown,
+}
+
+/// Dialog flavor on a [`SessionUiRequestMsg`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiRequestMethod {
+    Select,
+    Confirm,
+    Input,
+    Editor,
+}
+
+/// Why a `session.ui_resolved` fired. `Other` sinks future reasons — every
+/// reason means "dismiss the local copy".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiResolvedReason {
+    Answered,
+    Cancelled,
+    Timeout,
+    Interrupted,
+    #[serde(other)]
+    Other,
+}
+
+/// Payload of [`DaemonMessage::SessionUiRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUiRequestMsg {
+    pub session_id: String,
+    /// Echo back on `session.ui_response`.
+    pub request_id: String,
+    pub method: UiRequestMethod,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Choices for `method: select`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill: Option<String>,
+    /// Auto-cancel deadline in ms from `timestamp` (daemon-enforced).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    pub timestamp: String,
+}
+
+/// One provider-defined slash command (see `SessionCommandsResult`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCommand {
+    /// Invokable name without the leading slash.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Provider-specific origin taxonomy (e.g. "extension" | "prompt" |
+    /// "skill"). Display verbatim, never switch on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
 }
 
 /// Where the config entry was loaded from.
@@ -260,6 +353,11 @@ pub struct AuthOkMsg {
     /// send the field — treat as version 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_version: Option<u32>,
+    /// Capability identifiers the daemon supports (e.g. `commands.dynamic`,
+    /// `ui.dialogs`). Feature-detect on these instead of version-sniffing.
+    /// `None` on daemons that predate capability negotiation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

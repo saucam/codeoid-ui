@@ -43,7 +43,29 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
 fn build_palette(state: &AppState) -> Line<'static> {
     let query = state.command_query().unwrap_or("");
-    let matches = commands::filter_catalog(query);
+    // Built-ins first, then the focused session's provider commands
+    // (pi extensions, prompt templates, skills) — same prefix filter.
+    let mut matches: Vec<(String, String)> = commands::filter_catalog(query)
+        .into_iter()
+        .map(|(usage, desc)| ((*usage).to_string(), (*desc).to_string()))
+        .collect();
+    let query_lower = query.to_ascii_lowercase();
+    for cmd in state.focused_provider_commands() {
+        if !cmd.name.to_ascii_lowercase().starts_with(&query_lower) {
+            continue;
+        }
+        let usage = match &cmd.argument_hint {
+            Some(hint) => format!("/{} {hint}", cmd.name),
+            None => format!("/{}", cmd.name),
+        };
+        let desc = match (&cmd.description, &cmd.source) {
+            (Some(d), Some(s)) => format!("{d} ({s})"),
+            (Some(d), None) => d.clone(),
+            (None, Some(s)) => format!("provider command ({s})"),
+            (None, None) => "provider command".to_string(),
+        };
+        matches.push((usage, desc));
+    }
 
     if matches.is_empty() {
         return Line::from(vec![
@@ -81,7 +103,7 @@ fn build_palette(state: &AppState) -> Line<'static> {
             spans.push(Span::styled("  ·  ", Style::default().fg(Color::DarkGray)));
         }
         spans.push(Span::styled(
-            (*usage).to_string(),
+            usage.clone(),
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
@@ -290,5 +312,106 @@ fn fmt_ms(ms: u64) -> String {
         let mins = ms / 60_000;
         let secs = (ms % 60_000) / 1000;
         format!("{mins}m{secs:02}s")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use codeoid_protocol::{
+        AuthOkMsg, IdentityType, MessageIdentity, ProviderCommand, SessionInfo, SessionStatus,
+    };
+
+    use super::build_palette;
+    use crate::state::AppState;
+
+    fn mk_state() -> AppState {
+        let mut state = AppState::new(AuthOkMsg {
+            identity: MessageIdentity {
+                sub: "spiffe://x".into(),
+                name: Some("Me".into()),
+                kind: IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+            capabilities: None,
+        });
+        state.sessions.upsert(SessionInfo {
+            id: "s1".into(),
+            name: "demo".into(),
+            workdir: "/tmp".into(),
+            status: SessionStatus::Idle,
+            created_by: "u".into(),
+            created_at: "t".into(),
+            attached_clients: 0,
+            mode: None,
+            turns_remaining: None,
+            pinned_files: None,
+            agent_uri: None,
+            subagents: None,
+            usage: None,
+            rotation: None,
+            queued_messages: None,
+            model: None,
+            fallback_model: None,
+        });
+        state.provider_commands.insert(
+            "s1".into(),
+            vec![
+                ProviderCommand {
+                    name: "review".into(),
+                    description: Some("Review the diff".into()),
+                    source: Some("extension".into()),
+                    argument_hint: Some("<scope>".into()),
+                },
+                ProviderCommand {
+                    name: "fix-tests".into(),
+                    description: None,
+                    source: None,
+                    argument_hint: None,
+                },
+            ],
+        );
+        state
+    }
+
+    fn palette_text(state: &AppState) -> String {
+        build_palette(state)
+            .spans
+            .iter()
+            .map(|s| s.content.clone().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn palette_merges_provider_commands_after_builtins() {
+        let mut state = mk_state();
+        state.prompt.insert_str("/re");
+        let text = palette_text(&state);
+        assert!(text.contains("/rename"), "builtin first: {text}");
+        assert!(
+            text.contains("/review <scope>") || text.contains("+"),
+            "provider command (or overflow counter) visible: {text}"
+        );
+    }
+
+    #[test]
+    fn palette_annotates_source_and_falls_back_without_description() {
+        let mut state = mk_state();
+        state.prompt.insert_str("/review");
+        let text = palette_text(&state);
+        assert!(text.contains("Review the diff (extension)"), "{text}");
+
+        let mut state2 = mk_state();
+        state2.prompt.insert_str("/fix-");
+        let text2 = palette_text(&state2);
+        assert!(text2.contains("provider command"), "{text2}");
+    }
+
+    #[test]
+    fn palette_still_reports_no_match_for_unknown_verbs() {
+        let mut state = mk_state();
+        state.prompt.insert_str("/zzz");
+        let text = palette_text(&state);
+        assert!(text.contains("no matching command"), "{text}");
     }
 }

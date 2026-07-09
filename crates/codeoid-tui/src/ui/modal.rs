@@ -6,7 +6,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::state::{AppState, AskUserQuestionModal, CapabilitiesModal, CapabilitiesTab, Modal};
+use codeoid_protocol::UiRequestMethod;
+
+use crate::state::{
+    AppState, AskUserQuestionModal, CapabilitiesModal, CapabilitiesTab, Modal, UiDialogModal,
+};
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     // Signature matches the scope needed here; the rest of the tree can
@@ -27,7 +31,98 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         Modal::ConfirmDestroy { name, .. } => render_confirm_destroy(frame, area, name),
         Modal::Capabilities(c) => render_capabilities(frame, area, c),
         Modal::AskUserQuestion(m) => render_ask_user_question(frame, area, m),
+        Modal::UiDialog(m) => render_ui_dialog(frame, area, m),
     }
+}
+
+/// Provider-initiated dialog (`session.ui_request`) — select / confirm /
+/// input / editor. The daemon enforces the timeout; the header countdown is
+/// display only.
+fn render_ui_dialog(frame: &mut Frame<'_>, area: Rect, m: &UiDialogModal) {
+    let req = &m.request;
+    let mut rows: Vec<Line<'static>> = Vec::new();
+
+    if let Some(message) = &req.message {
+        rows.push(Line::from(Span::raw(message.clone())));
+        rows.push(Line::raw(""));
+    }
+
+    match req.method {
+        UiRequestMethod::Select => {
+            for (i, option) in req.options.iter().flatten().enumerate() {
+                let is_sel = i == m.selected;
+                let cursor = if is_sel { "▶ " } else { "  " };
+                let style = if is_sel {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                rows.push(Line::from(vec![
+                    Span::styled(cursor.to_string(), style),
+                    Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::DarkGray)),
+                    Span::styled(option.clone(), style),
+                ]));
+            }
+            rows.push(Line::raw(""));
+            rows.push(hint_line("↑↓ / 1-9 choose · Enter submit · Esc dismiss"));
+        }
+        UiRequestMethod::Confirm => {
+            rows.push(hint_line("y yes · n no · Esc dismiss"));
+        }
+        UiRequestMethod::Input | UiRequestMethod::Editor => {
+            if let Some(placeholder) = &req.placeholder {
+                if m.buffer.is_empty() {
+                    rows.push(Line::from(Span::styled(
+                        placeholder.clone(),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    )));
+                }
+            }
+            // Render the buffer with a block cursor at the end. Editor
+            // prefills can be multi-line; split so each line renders.
+            for (i, line) in m.buffer.split('\n').enumerate() {
+                let is_last = i == m.buffer.split('\n').count() - 1;
+                let mut spans = vec![Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Color::White),
+                )];
+                if is_last {
+                    spans.push(Span::styled("█", Style::default().fg(Color::Cyan)));
+                }
+                rows.push(Line::from(spans));
+            }
+            rows.push(Line::raw(""));
+            rows.push(hint_line("type to edit · Enter submit · Esc dismiss"));
+        }
+    }
+
+    let mut title = format!(" {} ", req.title);
+    if let Some(timeout_ms) = req.timeout_ms {
+        title = format!(" {} · auto-cancels in {}s ", req.title, timeout_ms / 1000);
+    }
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    frame.render_widget(
+        Paragraph::new(rows)
+            .block(block)
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        area,
+    );
+}
+
+fn hint_line(text: &'static str) -> Line<'static> {
+    Line::from(Span::styled(
+        text,
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    ))
 }
 
 fn centered(area: Rect, pct_x: u16, pct_y: u16) -> Rect {
@@ -541,4 +636,104 @@ fn render_ask_user_question(frame: &mut Frame<'_>, area: Rect, m: &AskUserQuesti
             .title_alignment(Alignment::Left),
     );
     frame.render_widget(p, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use codeoid_protocol::{
+        AuthOkMsg, IdentityType, MessageIdentity, SessionUiRequestMsg, UiRequestMethod,
+    };
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Cell;
+    use ratatui::Terminal;
+
+    use crate::state::{AppState, Modal, UiDialogModal};
+
+    fn mk_state() -> AppState {
+        AppState::new(AuthOkMsg {
+            identity: MessageIdentity {
+                sub: "spiffe://x".into(),
+                name: Some("Me".into()),
+                kind: IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+            capabilities: None,
+        })
+    }
+
+    fn mk_request(method: UiRequestMethod) -> SessionUiRequestMsg {
+        SessionUiRequestMsg {
+            session_id: "s1".into(),
+            request_id: "u1".into(),
+            method,
+            title: "Extension asks".into(),
+            message: Some("Please decide.".into()),
+            options: Some(vec!["Allow".into(), "Block".into()]),
+            placeholder: Some("type here".into()),
+            prefill: None,
+            timeout_ms: None,
+            timestamp: "t".into(),
+        }
+    }
+
+    fn render_to_text(state: &mut AppState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| super::render(f, state)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(Cell::symbol)
+            .collect()
+    }
+
+    #[test]
+    fn select_dialog_renders_options_cursor_and_hints() {
+        let mut state = mk_state();
+        let mut modal = UiDialogModal::new(mk_request(UiRequestMethod::Select));
+        modal.selected = 1;
+        state.modal = Some(Modal::UiDialog(modal));
+        let text = render_to_text(&mut state);
+        assert!(text.contains("Extension asks"), "{text}");
+        assert!(text.contains("Please decide."), "{text}");
+        assert!(text.contains("1. Allow"), "{text}");
+        assert!(text.contains("▶ 2. Block"), "{text}");
+        assert!(text.contains("Enter submit"), "{text}");
+    }
+
+    #[test]
+    fn confirm_dialog_renders_yn_hints_and_countdown_title() {
+        let mut state = mk_state();
+        let mut req = mk_request(UiRequestMethod::Confirm);
+        req.timeout_ms = Some(30_000);
+        state.modal = Some(Modal::UiDialog(UiDialogModal::new(req)));
+        let text = render_to_text(&mut state);
+        assert!(text.contains("y yes"), "{text}");
+        assert!(text.contains("auto-cancels in 30s"), "{text}");
+    }
+
+    #[test]
+    fn input_dialog_shows_placeholder_until_typed() {
+        let mut state = mk_state();
+        state.modal = Some(Modal::UiDialog(UiDialogModal::new(mk_request(
+            UiRequestMethod::Input,
+        ))));
+        let text = render_to_text(&mut state);
+        assert!(text.contains("type here"), "{text}");
+        assert!(text.contains("Enter submit"), "{text}");
+    }
+
+    #[test]
+    fn editor_dialog_renders_multiline_prefill_with_cursor() {
+        let mut state = mk_state();
+        let mut req = mk_request(UiRequestMethod::Editor);
+        req.prefill = Some("line one\nline two".into());
+        req.placeholder = None;
+        state.modal = Some(Modal::UiDialog(UiDialogModal::new(req)));
+        let text = render_to_text(&mut state);
+        assert!(text.contains("line one"), "{text}");
+        assert!(text.contains("line two█"), "{text}");
+    }
 }

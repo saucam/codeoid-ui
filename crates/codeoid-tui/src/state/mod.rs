@@ -15,7 +15,9 @@ pub mod sessions;
 
 use std::collections::{HashMap, HashSet};
 
-use codeoid_protocol::{AuthOkMsg, ModelInfo, SessionInfo};
+use codeoid_protocol::{
+    AuthOkMsg, ModelInfo, ProviderCommand, SessionInfo, SessionUiRequestMsg, UiRequestMethod,
+};
 use tui_textarea::TextArea;
 
 use self::messages::MessageStore;
@@ -37,6 +39,19 @@ pub struct AppState {
     pub messages: MessageStore,
     pub focus: Focus,
     pub modal: Option<Modal>,
+    /// Pending provider dialogs (`session.ui_request`) per session, oldest
+    /// first. Mirrors the daemon: add on request (attach re-delivery makes
+    /// duplicates normal — dedupe by `request_id`), drop on
+    /// `session.ui_resolved`. The focused session's head request opens the
+    /// [`Modal::UiDialog`] when no other modal is up.
+    pub pending_ui_requests: HashMap<String, Vec<SessionUiRequestMsg>>,
+    /// Provider-defined slash commands per session (`session.commands`).
+    /// Merged into the `/` palette and consulted as a parse fallback so
+    /// `/review …` reaches the provider as plain prompt text.
+    pub provider_commands: HashMap<String, Vec<ProviderCommand>>,
+    /// Sessions whose command catalog has been requested this connection —
+    /// fetch-once bookkeeping (reset on reconnect).
+    pub commands_requested: HashSet<String>,
     /// Prompt editor. `TextArea` handles cursor movement, word-level
     /// navigation, arrow keys, backspace/delete, multi-line, and
     /// rendering of the cursor glyph — everything a real editor needs.
@@ -151,6 +166,9 @@ impl AppState {
             messages: MessageStore::default(),
             focus: Focus::Prompt,
             modal: None,
+            pending_ui_requests: HashMap::new(),
+            provider_commands: HashMap::new(),
+            commands_requested: HashSet::new(),
             prompt,
             scroll_offset: 0,
             last_total_rendered: 0,
@@ -392,6 +410,74 @@ impl AppState {
         }
         self.last_total_rendered = total;
     }
+
+    // ── Provider dialogs (session.ui_request) ─────────────────────────────
+
+    /// Record a pending dialog. Attach re-delivery makes duplicates normal —
+    /// upsert by `request_id`.
+    pub fn add_ui_request(&mut self, req: SessionUiRequestMsg) {
+        let list = self
+            .pending_ui_requests
+            .entry(req.session_id.clone())
+            .or_default();
+        if !list.iter().any(|r| r.request_id == req.request_id) {
+            list.push(req);
+        }
+    }
+
+    /// Drop a settled dialog (answered anywhere, timed out, interrupted).
+    /// Also closes the open modal if it was showing this request.
+    pub fn remove_ui_request(&mut self, session_id: &str, request_id: &str) {
+        if let Some(list) = self.pending_ui_requests.get_mut(session_id) {
+            list.retain(|r| r.request_id != request_id);
+            if list.is_empty() {
+                self.pending_ui_requests.remove(session_id);
+            }
+        }
+        if let Some(Modal::UiDialog(m)) = self.modal.as_ref() {
+            if m.request.session_id == session_id && m.request.request_id == request_id {
+                self.modal = None;
+            }
+        }
+    }
+
+    /// Open the focused session's oldest pending dialog — only when no other
+    /// modal is up (never steal an approval form or a confirm-destroy).
+    pub fn maybe_open_ui_dialog(&mut self) {
+        if self.modal.is_some() {
+            return;
+        }
+        let Some(focused_id) = self.sessions.focused().map(|s| s.id.clone()) else {
+            return;
+        };
+        let Some(req) = self
+            .pending_ui_requests
+            .get(&focused_id)
+            .and_then(|list| list.first())
+            .cloned()
+        else {
+            return;
+        };
+        self.modal = Some(Modal::UiDialog(UiDialogModal::new(req)));
+    }
+
+    /// Provider commands for the focused session ([] until fetched).
+    #[must_use]
+    pub fn focused_provider_commands(&self) -> &[ProviderCommand] {
+        self.sessions
+            .focused()
+            .and_then(|s| self.provider_commands.get(&s.id))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Case-insensitive membership test — the parse fallback that lets
+    /// `/review …` reach the provider as plain prompt text.
+    #[must_use]
+    pub fn is_provider_command(&self, name: &str) -> bool {
+        self.focused_provider_commands()
+            .iter()
+            .any(|c| c.name.eq_ignore_ascii_case(name))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,6 +493,66 @@ pub enum Modal {
     ConfirmDestroy { session_id: String, name: String },
     Capabilities(CapabilitiesModal),
     AskUserQuestion(AskUserQuestionModal),
+    UiDialog(UiDialogModal),
+}
+
+/// Modal for a provider-initiated dialog (`session.ui_request`). Unlike
+/// AskUserQuestion (which rides the tool-approval flow), these settle via
+/// `session.ui_response`. One dialog at a time — resolving the head request
+/// opens the next pending one for the focused session.
+#[derive(Debug, Clone)]
+pub struct UiDialogModal {
+    pub request: SessionUiRequestMsg,
+    /// Cursor into `request.options` for `method: select`.
+    pub selected: usize,
+    /// Text buffer for `method: input` / `editor` (seeded from `prefill`).
+    pub buffer: String,
+}
+
+impl UiDialogModal {
+    #[must_use]
+    pub fn new(request: SessionUiRequestMsg) -> Self {
+        let buffer = request.prefill.clone().unwrap_or_default();
+        Self {
+            request,
+            selected: 0,
+            buffer,
+        }
+    }
+
+    /// True for methods whose primary interaction is typing — unresolved
+    /// keystrokes feed [`Self::buffer`] instead of being absorbed.
+    #[must_use]
+    pub fn is_text_entry(&self) -> bool {
+        matches!(
+            self.request.method,
+            UiRequestMethod::Input | UiRequestMethod::Editor
+        )
+    }
+
+    pub fn next_option(&mut self) {
+        let len = self.request.options.as_ref().map_or(0, Vec::len);
+        if len > 0 {
+            self.selected = (self.selected + 1) % len;
+        }
+    }
+
+    pub fn prev_option(&mut self) {
+        let len = self.request.options.as_ref().map_or(0, Vec::len);
+        if len > 0 {
+            self.selected = (self.selected + len - 1) % len;
+        }
+    }
+
+    /// The currently selected option label (`method: select`).
+    #[must_use]
+    pub fn selected_option(&self) -> Option<&str> {
+        self.request
+            .options
+            .as_ref()
+            .and_then(|opts| opts.get(self.selected))
+            .map(String::as_str)
+    }
 }
 
 /// Per-question selection state for the AskUserQuestion form. For
@@ -607,6 +753,7 @@ mod tests {
             },
             scopes: vec![],
             protocol_version: Some(1),
+            capabilities: None,
         })
     }
 
@@ -868,5 +1015,136 @@ mod tests {
         assert_eq!(state.scroll_offset, 100);
         assert_eq!(state.unseen_below_rows, 0);
         assert_eq!(state.last_total_rendered, 50);
+    }
+
+    // ── Provider dialogs + commands ───────────────────────────────────────
+
+    fn mk_ui_request(sid: &str, rid: &str) -> SessionUiRequestMsg {
+        SessionUiRequestMsg {
+            session_id: sid.into(),
+            request_id: rid.into(),
+            method: UiRequestMethod::Select,
+            title: "Pick".into(),
+            message: None,
+            options: Some(vec!["a".into(), "b".into(), "c".into()]),
+            placeholder: None,
+            prefill: None,
+            timeout_ms: None,
+            timestamp: "t".into(),
+        }
+    }
+
+    #[test]
+    fn ui_requests_dedupe_and_keep_arrival_order() {
+        let mut state = mk_state();
+        state.add_ui_request(mk_ui_request("s1", "a"));
+        state.add_ui_request(mk_ui_request("s1", "b"));
+        // Attach re-delivery — must not duplicate.
+        state.add_ui_request(mk_ui_request("s1", "a"));
+        assert_eq!(state.pending_ui_requests["s1"].len(), 2);
+        assert_eq!(state.pending_ui_requests["s1"][0].request_id, "a");
+    }
+
+    #[test]
+    fn maybe_open_ui_dialog_opens_head_for_focused_session_only() {
+        let mut state = mk_state();
+        state.sessions.replace(vec![mk_session_info("s1")]);
+        state.sessions.focus_id("s1");
+        state.add_ui_request(mk_ui_request("other", "x"));
+        state.maybe_open_ui_dialog();
+        assert!(
+            state.modal.is_none(),
+            "other session's dialog must not open"
+        );
+
+        state.add_ui_request(mk_ui_request("s1", "a"));
+        state.maybe_open_ui_dialog();
+        match state.modal.as_ref() {
+            Some(Modal::UiDialog(m)) => assert_eq!(m.request.request_id, "a"),
+            other => panic!("expected UiDialog, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maybe_open_never_steals_an_existing_modal() {
+        let mut state = mk_state();
+        state.sessions.replace(vec![mk_session_info("s1")]);
+        state.sessions.focus_id("s1");
+        state.modal = Some(Modal::Help);
+        state.add_ui_request(mk_ui_request("s1", "a"));
+        state.maybe_open_ui_dialog();
+        assert!(matches!(state.modal, Some(Modal::Help)));
+    }
+
+    #[test]
+    fn remove_ui_request_closes_matching_modal_and_reveals_next() {
+        let mut state = mk_state();
+        state.sessions.replace(vec![mk_session_info("s1")]);
+        state.sessions.focus_id("s1");
+        state.add_ui_request(mk_ui_request("s1", "a"));
+        state.add_ui_request(mk_ui_request("s1", "b"));
+        state.maybe_open_ui_dialog();
+
+        // Resolved elsewhere (another client answered / timeout).
+        state.remove_ui_request("s1", "a");
+        assert!(state.modal.is_none(), "resolved dialog must close");
+        state.maybe_open_ui_dialog();
+        match state.modal.as_ref() {
+            Some(Modal::UiDialog(m)) => assert_eq!(m.request.request_id, "b"),
+            other => panic!("expected next dialog, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ui_dialog_modal_navigation_and_text_entry() {
+        let mut m = UiDialogModal::new(mk_ui_request("s1", "a"));
+        assert!(!m.is_text_entry());
+        assert_eq!(m.selected_option(), Some("a"));
+        m.next_option();
+        assert_eq!(m.selected_option(), Some("b"));
+        m.prev_option();
+        m.prev_option();
+        assert_eq!(m.selected_option(), Some("c"), "prev wraps");
+
+        let mut req = mk_ui_request("s1", "b");
+        req.method = UiRequestMethod::Editor;
+        req.prefill = Some("draft".into());
+        req.options = None;
+        let text = UiDialogModal::new(req);
+        assert!(text.is_text_entry());
+        assert_eq!(text.buffer, "draft");
+        assert_eq!(text.selected_option(), None);
+    }
+
+    #[test]
+    fn provider_command_lookup_is_focused_session_scoped_and_case_insensitive() {
+        let mut state = mk_state();
+        state.sessions.replace(vec![mk_session_info("s1")]);
+        state.sessions.focus_id("s1");
+        state.provider_commands.insert(
+            "s1".into(),
+            vec![ProviderCommand {
+                name: "Fix-Tests".into(),
+                description: None,
+                source: Some("extension".into()),
+                argument_hint: None,
+            }],
+        );
+        state.provider_commands.insert(
+            "other".into(),
+            vec![ProviderCommand {
+                name: "deploy".into(),
+                description: None,
+                source: None,
+                argument_hint: None,
+            }],
+        );
+        assert!(state.is_provider_command("fix-tests"));
+        assert!(state.is_provider_command("FIX-TESTS"));
+        assert!(
+            !state.is_provider_command("deploy"),
+            "other session's catalog"
+        );
+        assert_eq!(state.focused_provider_commands().len(), 1);
     }
 }
