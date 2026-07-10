@@ -164,6 +164,22 @@ pub enum ClientMessage {
         provider_id: String,
     },
 
+    /// Branch a session into an independent one, optionally onto a different
+    /// backend. The fork is seeded with a deep copy of the parent's canonical
+    /// history + restamped scrollback; the parent is untouched. `name` absent
+    /// ⇒ parent name + " (fork)"; `provider_id` absent ⇒ parent's backend.
+    /// Fail-closed: foreign/unknown session ⇒ not_found, unknown provider ⇒
+    /// invalid_request.
+    #[serde(rename = "session.fork", rename_all = "camelCase")]
+    SessionFork {
+        id: String,
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_id: Option<String>,
+    },
+
     #[serde(rename = "session.set_model", rename_all = "camelCase")]
     SessionSetModel {
         id: String,
@@ -247,6 +263,7 @@ impl ClientMessage {
             | Self::SessionRotate { id, .. }
             | Self::SessionSearch { id, .. }
             | Self::SessionSetProvider { id, .. }
+            | Self::SessionFork { id, .. }
             | Self::SessionSetModel { id, .. }
             | Self::SessionRename { id, .. }
             | Self::ClaudeConfig { id, .. }

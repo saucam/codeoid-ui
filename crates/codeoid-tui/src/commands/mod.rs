@@ -42,6 +42,11 @@ pub enum SlashCommand {
     /// `/provider <id>` — switch the focused session's backend mid-session
     /// (claude ⇄ pi …). The daemon rejects unknown ids and mid-turn switches.
     Provider(String),
+    /// `/fork [backend]` — branch the focused session into an independent
+    /// one, optionally continuing it on a different backend. With no argument
+    /// the fork keeps the parent's backend; the daemon fail-closes on an
+    /// unknown backend id.
+    Fork { provider_id: Option<String> },
     /// `/who` — show the authenticated ZeroID identity + scopes.
     Who,
     /// `/rotate` — rotate the backing Claude Code context.
@@ -56,7 +61,7 @@ pub enum SlashCommand {
     /// `/export [path]` — write the focused session to a JSON bundle
     /// (under `~/.codeoid/exports/` by default; or to the given path).
     Export { path: Option<String> },
-    /// `/import <bundle.json> <target-workdir>` — fork a bundle into a
+    /// `/import <bundle.json> <target-workdir>` — load a bundle into a
     /// fresh session anchored at `target-workdir`.
     Import {
         bundle_path: String,
@@ -161,6 +166,12 @@ pub fn parse(text: &str) -> Result<Option<SlashCommand>, ParseError> {
                 .ok_or(ParseError::ProviderMissingId)?;
             SlashCommand::Provider(id.to_lowercase())
         }
+        "fork" => {
+            // `/fork` keeps the parent backend; `/fork <backend>` continues
+            // the branch on another one. The backend id is a single token.
+            let provider_id = rest_of_line.first().map(|s| s.to_lowercase());
+            SlashCommand::Fork { provider_id }
+        }
         "rename" | "mv" => {
             // Everything after the command is the full name — users may
             // want spaces or punctuation in labels. Reject empty / pure
@@ -198,7 +209,7 @@ pub fn parse(text: &str) -> Result<Option<SlashCommand>, ParseError> {
             };
             SlashCommand::Export { path }
         }
-        "import" | "fork" => {
+        "import" => {
             if rest_of_line.len() < 2 {
                 return Err(ParseError::ImportMissingArgs);
             }
@@ -240,6 +251,10 @@ pub const CATALOG: &[(&str, &str)] = &[
     (
         "/provider <id>",
         "switch the session's backend (claude, pi, …)",
+    ),
+    (
+        "/fork [backend]",
+        "branch this session, optionally onto another backend",
     ),
     ("/rename <new-name>", "rename the focused session"),
     ("/destroy", "destroy the focused session"),
@@ -540,6 +555,27 @@ mod tests {
             Ok(Some(SlashCommand::Provider("pi".into())))
         );
         assert_eq!(parse("/provider"), Err(ParseError::ProviderMissingId));
+    }
+
+    #[test]
+    fn fork_command_parses_with_optional_lowercased_backend() {
+        // Bare `/fork` keeps the parent backend (no id).
+        assert_eq!(
+            parse("/fork"),
+            Ok(Some(SlashCommand::Fork { provider_id: None }))
+        );
+        // `/fork <backend>` continues the branch elsewhere, lowercased.
+        assert_eq!(
+            parse("/fork CODEX"),
+            Ok(Some(SlashCommand::Fork {
+                provider_id: Some("codex".into())
+            }))
+        );
+    }
+
+    #[test]
+    fn fork_is_in_catalog() {
+        assert!(CATALOG.iter().any(|(usage, _)| usage.starts_with("/fork")));
     }
 
     #[test]

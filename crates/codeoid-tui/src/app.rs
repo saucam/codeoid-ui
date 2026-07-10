@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use codeoid_client::{connect, ClientHandle, Connected, StreamEvent};
-use codeoid_protocol::{ClientMessage, DaemonMessage, SessionMode, SessionStatus, ToolState};
+use codeoid_protocol::{
+    ClientMessage, DaemonMessage, SessionInfo, SessionMode, SessionStatus, ToolState,
+};
 use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind, MouseEventKind};
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
@@ -1029,6 +1031,7 @@ impl App {
                 provider_id,
             } => self.create_session(name, workdir, provider_id).await,
             SlashCommand::Provider(provider_id) => self.set_provider(provider_id).await,
+            SlashCommand::Fork { provider_id } => self.fork_focused(provider_id).await,
             SlashCommand::Rename { name } => self.rename_focused(name).await,
             SlashCommand::Destroy => self.destroy_focused().await,
             SlashCommand::Interrupt => self.interrupt().await,
@@ -1255,6 +1258,59 @@ impl App {
                 // surface here with their real message.
                 if let Some(state) = self.state.as_mut() {
                     state.record_error(format!("/provider failed: {e}"));
+                }
+            }
+        }
+    }
+
+    /// `/fork [backend]` — branch the focused session into an independent one,
+    /// optionally continuing it on another backend. The daemon returns the new
+    /// [`SessionInfo`]; we upsert it and focus it so the new tab is active. It
+    /// validates fail-closed (unknown session/backend) and its error lands via
+    /// the response.
+    async fn fork_focused(&mut self, provider_id: Option<String>) {
+        let Some(session_id) = self
+            .state
+            .as_ref()
+            .and_then(|s| s.sessions.focused_id().map(ToString::to_string))
+        else {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error("no session focused — /fork needs one");
+            }
+            return;
+        };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
+        let msg = session_fork_message(ClientHandle::next_request_id(), session_id, provider_id);
+        match handle.request_ok(msg).await {
+            Ok(data) => {
+                let applied = self
+                    .state
+                    .as_mut()
+                    .map(|state| apply_fork_response(state, data));
+                match applied {
+                    // Fork landed: refresh the list so the daemon's view and
+                    // ours reconcile (the fork isn't attached, so nothing
+                    // arrives on its own).
+                    Some(Ok(())) => {
+                        let _ = handle
+                            .send(ClientMessage::SessionList {
+                                id: ClientHandle::next_request_id(),
+                            })
+                            .await;
+                    }
+                    Some(Err(e)) => {
+                        if let Some(state) = self.state.as_mut() {
+                            state.record_error(e);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            Err(e) => {
+                if let Some(state) = self.state.as_mut() {
+                    state.record_error(format!("/fork failed: {e}"));
                 }
             }
         }
@@ -1759,6 +1815,40 @@ fn set_provider_message(id: String, session_id: String, provider_id: String) -> 
     }
 }
 
+/// Pure `session.fork` frame builder (see `session_create_message`). `name` is
+/// left to the daemon default (parent name + " (fork)"); `provider_id` absent
+/// keeps the parent's backend.
+fn session_fork_message(
+    id: String,
+    session_id: String,
+    provider_id: Option<String>,
+) -> ClientMessage {
+    ClientMessage::SessionFork {
+        id,
+        session_id,
+        name: None,
+        provider_id,
+    }
+}
+
+/// Apply a `session.fork` response to the tab strip: add the returned fork and
+/// focus it so its tab becomes active. Pure over [`AppState`] (no daemon I/O)
+/// so the add-and-focus behaviour is unit-testable. `Err` carries a message
+/// the caller surfaces if the daemon answered without a session payload.
+fn apply_fork_response(
+    state: &mut AppState,
+    data: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let fork: SessionInfo = data
+        .and_then(|v| serde_json::from_value(v).ok())
+        .ok_or_else(|| "/fork: daemon returned no session".to_string())?;
+    let fork_id = fork.id.clone();
+    state.sessions.upsert(fork);
+    state.sessions.focus_id(&fork_id);
+    state.last_error = None;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use codeoid_protocol::{
@@ -2059,6 +2149,78 @@ mod tests {
         assert_eq!(json["type"], "session.set_provider");
         assert_eq!(json["sessionId"], "s1");
         assert_eq!(json["providerId"], "pi");
+
+        // Fork onto another backend: type + session + backend, name defaulted
+        // by the daemon (absent on the wire).
+        let fork = session_fork_message("r4".into(), "s1".into(), Some("codex".into()));
+        let json = serde_json::to_value(&fork).unwrap();
+        assert_eq!(json["type"], "session.fork");
+        assert_eq!(json["sessionId"], "s1");
+        assert_eq!(json["providerId"], "codex");
+        assert!(json.get("name").is_none());
+
+        // Fork without a backend → providerId absent (parent's backend kept).
+        let same = session_fork_message("r5".into(), "s1".into(), None);
+        let json = serde_json::to_value(&same).unwrap();
+        assert!(json.get("providerId").is_none());
+    }
+
+    #[test]
+    fn apply_fork_response_adds_and_focuses_the_returned_fork() {
+        let mut state = mk_state();
+        // Parent "s1" is focused to start.
+        assert_eq!(state.sessions.focused_id(), Some("s1"));
+
+        // The daemon's fork payload: same shape as the parent, new id + name.
+        let fork_info = SessionInfo {
+            id: "s1-fork".into(),
+            name: "demo (fork)".into(),
+            ..state.sessions.items()[0].clone()
+        };
+        let data = Some(serde_json::to_value(&fork_info).unwrap());
+        apply_fork_response(&mut state, data).expect("valid payload");
+
+        // The fork is now a tab AND focused; the parent is untouched.
+        assert_eq!(state.sessions.focused_id(), Some("s1-fork"));
+        assert!(state.sessions.items().iter().any(|s| s.id == "s1"));
+        assert!(state.sessions.items().iter().any(|s| s.id == "s1-fork"));
+        assert!(state.last_error.is_none());
+    }
+
+    #[test]
+    fn apply_fork_response_errors_without_a_session_payload() {
+        let mut state = mk_state();
+        // Daemon answered `ok` but with no data (or an unparseable body).
+        assert!(apply_fork_response(&mut state, None)
+            .unwrap_err()
+            .contains("no session"));
+        assert!(apply_fork_response(&mut state, Some(serde_json::json!({"junk": 1}))).is_err());
+        // Focus stayed on the parent — nothing was added.
+        assert_eq!(state.sessions.focused_id(), Some("s1"));
+    }
+
+    #[tokio::test]
+    async fn fork_focused_requires_a_focused_session() {
+        let mut app = App::new("ws://test".into(), "tok".into());
+        app.state = Some(AppState::new(codeoid_protocol::AuthOkMsg {
+            identity: codeoid_protocol::MessageIdentity {
+                sub: "u".into(),
+                name: None,
+                kind: codeoid_protocol::IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+            capabilities: None,
+            providers: Some(vec!["claude".into(), "codex".into()]),
+        }));
+        app.fork_focused(None).await;
+        assert!(app
+            .state
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("no session focused")));
     }
 
     #[tokio::test]
@@ -2102,6 +2264,12 @@ mod tests {
             .unwrap()
             .prompt
             .insert_str("/new demo --provider pi");
+        app.submit_prompt().await;
+        // `/fork` and `/fork <backend>` route through dispatch and return at
+        // the missing-handle guard without queueing anything.
+        app.state.as_mut().unwrap().prompt.insert_str("/fork");
+        app.submit_prompt().await;
+        app.state.as_mut().unwrap().prompt.insert_str("/fork codex");
         app.submit_prompt().await;
         assert!(app.pending_sends.is_empty(), "no handle — nothing queued");
     }
