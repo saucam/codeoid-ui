@@ -300,7 +300,62 @@ impl std::fmt::Debug for ScrollbackBuildCache {
 
 #[cfg(test)]
 mod tests {
-    use super::{visible_window, ScrollbackBuild, ScrollbackBuildCache, LRU_SESSIONS};
+    use super::{
+        visible_window, wrapped_row_count, ScrollbackBuild, ScrollbackBuildCache, LRU_SESSIONS,
+    };
+
+    // ── wrapped_row_count: unicode / tab regression cases ─────────────────
+    //
+    // Ported from the deleted hand-rolled `render/wrap.rs` counter. These
+    // document the behaviours the scroll math depends on — CJK glyphs are
+    // 2 columns, tabs advance, word-wrap beats char-count division — as
+    // computed by ratatui's own `Paragraph::line_count`, which is the ONE
+    // measurement every cache/splice/prefix-sum path shares.
+
+    fn line(s: &str) -> Line<'static> {
+        Line::from(Span::raw(s.to_string()))
+    }
+
+    #[test]
+    fn row_count_basics() {
+        assert_eq!(wrapped_row_count(&line(""), 80), 1, "empty = one row");
+        assert_eq!(wrapped_row_count(&line("hello"), 80), 1);
+        assert_eq!(wrapped_row_count(&line("0123456789"), 10), 1, "exact fit");
+        assert_eq!(wrapped_row_count(&line("01234567890"), 10), 2, "one over");
+    }
+
+    #[test]
+    fn row_count_cjk_double_width() {
+        // CJK glyphs occupy 2 columns — a codepoint-count division would
+        // say "世界世界" (4 chars, 8 columns) fits one width-4 row; the
+        // real wrap needs two. (Ratatui lets a final wide glyph straddle
+        // the right edge, so exact-boundary widths can read one row less —
+        // rendering and counting share that quirk, which is the property
+        // the scroll math actually relies on.)
+        assert_eq!(wrapped_row_count(&line("世界世界"), 4), 2);
+        assert_eq!(wrapped_row_count(&line("世界世界"), 3), 3);
+        assert_eq!(wrapped_row_count(&line("世界世界"), 2), 4);
+        assert_eq!(wrapped_row_count(&line("世界世界世界"), 4), 3);
+    }
+
+    #[test]
+    fn row_count_word_wrap_and_long_tokens() {
+        // Word wrap: break on the space, not at ceil(11/7).
+        assert_eq!(wrapped_row_count(&line("hello world"), 7), 2);
+        // No break point: char-wrap a long token.
+        assert_eq!(wrapped_row_count(&line("abcdefghij"), 4), 3);
+    }
+
+    #[test]
+    fn row_count_multi_span_lines_measure_joined() {
+        let l = Line::from(vec![
+            Span::raw("hello ".to_string()),
+            Span::raw("beautiful ".to_string()),
+            Span::raw("world".to_string()),
+        ]);
+        // 21 cols at width 10 wraps on the word boundaries → 3 rows.
+        assert_eq!(wrapped_row_count(&l, 10), 3);
+    }
 
     // Three logical lines wrapping to 2, 3, and 4 rows → total 9 rows.
     // row_offsets = [0, 2, 5, 9]:  line0=rows 0..2, line1=2..5, line2=5..9.

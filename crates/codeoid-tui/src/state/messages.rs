@@ -183,6 +183,25 @@ impl MessageStore {
         self.by_session.insert(session_id, messages);
     }
 
+    /// Drop every per-session and per-message entry for sessions not in
+    /// `live`. Without this, a long-lived TUI keeps the full transcript
+    /// (plus one `versions` entry per message id ever seen) of every
+    /// session destroyed elsewhere, for the life of the process. Called
+    /// on each `session.list.result` — the daemon's list is the truth.
+    pub fn retain_sessions(&mut self, live: &std::collections::HashSet<String>) {
+        self.by_session.retain(|sid, _| live.contains(sid));
+        self.session_epoch.retain(|sid, _| live.contains(sid));
+        // Rebuild the live message-id set from what's left; this also
+        // sheds version entries orphaned by `replace_scrollback` swaps.
+        let keep: std::collections::HashSet<&str> = self
+            .by_session
+            .values()
+            .flatten()
+            .map(|m| m.message_id.as_str())
+            .collect();
+        self.versions.retain(|mid, _| keep.contains(mid.as_str()));
+    }
+
     /// Strip the cheapest possible text preview from a message, for list
     /// views that don't want the full rich part tree.
     pub fn preview(msg: &SessionMessage) -> String {
@@ -508,6 +527,29 @@ mod tests {
             markdown: None,
         }]);
         assert_eq!(MessageStore::preview(&m), "plain");
+    }
+
+    #[test]
+    fn retain_sessions_drops_dead_transcripts_and_orphaned_versions() {
+        let mut store = MessageStore::default();
+        store.apply_message(mk_msg("alive", "a1"));
+        store.apply_message(mk_msg("alive", "a2"));
+        store.apply_message(mk_msg("dead", "d1"));
+        // A scrollback swap orphans the old message id "a1".
+        store.replace_scrollback("alive".into(), vec![mk_msg("alive", "a2")]);
+        assert!(store.version_of("a1") > 0, "orphaned version still present");
+
+        let live: std::collections::HashSet<String> = ["alive".to_string()].into();
+        store.retain_sessions(&live);
+
+        // Dead session's transcript + epoch gone; live untouched.
+        assert!(store.messages("dead").is_empty());
+        assert_eq!(store.messages("alive").len(), 1);
+        assert!(store.epoch_of_session("alive") > 0);
+        // Versions pruned to messages that still exist anywhere.
+        assert_eq!(store.version_of("d1"), 0);
+        assert_eq!(store.version_of("a1"), 0, "orphan swept");
+        assert!(store.version_of("a2") > 0);
     }
 
     #[test]

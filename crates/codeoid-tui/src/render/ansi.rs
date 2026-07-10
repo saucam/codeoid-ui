@@ -36,7 +36,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
 /// Tab stop width for `\t` expansion. Matches the de-facto terminal
-/// default (and `crate::render::wrap::TAB_WIDTH`).
+/// default.
 const TAB_WIDTH: usize = 8;
 
 /// Parse a string containing ANSI SGR codes into styled lines.

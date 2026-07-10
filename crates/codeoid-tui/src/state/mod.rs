@@ -346,6 +346,20 @@ impl AppState {
 
     pub fn set_sessions(&mut self, sessions: Vec<SessionInfo>) {
         self.sessions.replace(sessions);
+        self.prune_dead_session_state();
+    }
+
+    /// Drop per-session client state for sessions the daemon no longer
+    /// reports (destroyed in another client, expired, …). Without this a
+    /// long-lived TUI attached to a busy daemon leaks a transcript's worth
+    /// of memory per dead session. The render caches are LRU-bounded and
+    /// need no help here.
+    fn prune_dead_session_state(&mut self) {
+        let live: HashSet<String> = self.sessions.items().iter().map(|s| s.id.clone()).collect();
+        self.messages.retain_sessions(&live);
+        self.activity_by_session.retain(|sid, _| live.contains(sid));
+        self.attached.retain(|sid| live.contains(sid));
+        self.pending_ui_requests.retain(|sid, _| live.contains(sid));
     }
 
     pub fn merge_session(&mut self, session: SessionInfo) {
@@ -716,6 +730,44 @@ mod tests {
             fallback_model: None,
             provider_id: None,
         }
+    }
+
+    #[test]
+    fn set_sessions_prunes_state_for_dead_sessions() {
+        let mut state = AppState::new(AuthOkMsg {
+            identity: MessageIdentity {
+                sub: "u".into(),
+                name: None,
+                kind: IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+            capabilities: None,
+            providers: None,
+        });
+        // Two sessions with client-side state hanging off each.
+        for sid in ["alive", "dead"] {
+            state.sessions.upsert(mk_session_info(sid));
+            state
+                .messages
+                .apply_message(tool_call_msg(sid, &format!("{sid}-m1")));
+            state.note_attached(sid);
+            state.mark_activity(sid);
+        }
+
+        // The daemon's next list only knows "alive" (dead was destroyed
+        // in another client).
+        state.set_sessions(vec![mk_session_info("alive")]);
+
+        assert!(
+            state.messages.messages("dead").is_empty(),
+            "transcript freed"
+        );
+        assert!(!state.attached.contains("dead"));
+        assert!(!state.activity_by_session.contains_key("dead"));
+        // Live session untouched.
+        assert_eq!(state.messages.messages("alive").len(), 1);
+        assert!(state.attached.contains("alive"));
     }
 
     fn tool_call_msg(sid: &str, mid: &str) -> codeoid_protocol::SessionMessage {
