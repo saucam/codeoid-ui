@@ -32,6 +32,9 @@ pub enum ClientError {
     #[error("request {0} was cancelled before a response arrived")]
     RequestCancelled(String),
 
+    #[error("request {0} timed out waiting for the daemon")]
+    RequestTimeout(String),
+
     #[error("daemon stream ended unexpectedly")]
     StreamClosed,
 

@@ -70,6 +70,9 @@ pub enum Action {
     /// UiDialog modal: dismiss — sends `cancelled: true` so the provider
     /// unblocks with "no answer" rather than waiting forever.
     UiDialogCancel,
+    /// ConfirmDestroy modal: the user pressed `y` — actually destroy the
+    /// session named in the modal.
+    ConfirmDestroy,
 }
 
 /// What kind of modal is currently open. The AskUserQuestion form needs
@@ -88,6 +91,9 @@ pub enum ModalKind {
     /// and Ctrl+C are bound; every other key falls through to the app
     /// reducer, which feeds it into the dialog's text buffer.
     UiDialogText,
+    /// The `/destroy` confirmation — `y` destroys, `n`/Esc/`q` cancel,
+    /// everything else is absorbed.
+    ConfirmDestroy,
 }
 
 pub fn resolve(
@@ -146,8 +152,21 @@ pub fn resolve(
         };
     }
 
-    // Generic modals (Help / ConfirmDestroy / Capabilities) — Esc / q
-    // dismiss, the rest is absorbed so keystrokes don't leak through.
+    // ConfirmDestroy — `y` fires the destroy, `n`/Esc/`q` cancel; every
+    // other key is absorbed so a stray keystroke can't confirm by accident.
+    if matches!(modal_kind, ModalKind::ConfirmDestroy) {
+        return match (event.code, event.modifiers) {
+            (Char('y'), KeyModifiers::NONE) => Some(Action::ConfirmDestroy),
+            (Char('n'), KeyModifiers::NONE) | (Esc, _) | (Char('q'), KeyModifiers::NONE) => {
+                Some(Action::DismissModal)
+            }
+            (Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
+            _ => None,
+        };
+    }
+
+    // Generic modals (Help / Capabilities) — Esc / q dismiss, the rest is
+    // absorbed so keystrokes don't leak through.
     if matches!(modal_kind, ModalKind::Generic) {
         return match (event.code, event.modifiers) {
             (Esc, _) | (Char('q'), KeyModifiers::NONE) => Some(Action::DismissModal),
@@ -289,6 +308,57 @@ mod tests {
             resolve(ctrl(KeyCode::Char('c')), false, ModalKind::Generic, false),
             Some(Action::Quit)
         );
+    }
+
+    // ------------ ConfirmDestroy modal ------------
+
+    #[test]
+    fn confirm_destroy_y_confirms_n_esc_q_cancel() {
+        assert_eq!(
+            resolve(
+                key(KeyCode::Char('y')),
+                false,
+                ModalKind::ConfirmDestroy,
+                false
+            ),
+            Some(Action::ConfirmDestroy)
+        );
+        for cancel in [
+            key(KeyCode::Char('n')),
+            key(KeyCode::Esc),
+            key(KeyCode::Char('q')),
+        ] {
+            assert_eq!(
+                resolve(cancel, false, ModalKind::ConfirmDestroy, false),
+                Some(Action::DismissModal)
+            );
+        }
+        assert_eq!(
+            resolve(
+                ctrl(KeyCode::Char('c')),
+                false,
+                ModalKind::ConfirmDestroy,
+                false
+            ),
+            Some(Action::Quit)
+        );
+    }
+
+    #[test]
+    fn confirm_destroy_absorbs_everything_else() {
+        // A stray Enter / letter must not confirm or leak into navigation —
+        // only an explicit `y` destroys.
+        for absorbed in [
+            key(KeyCode::Enter),
+            key(KeyCode::Char('d')),
+            key(KeyCode::Char('x')),
+            key(KeyCode::Tab),
+        ] {
+            assert_eq!(
+                resolve(absorbed, false, ModalKind::ConfirmDestroy, false),
+                None
+            );
+        }
     }
 
     // ------------ prompt focused: editor routes, modifiers handled ------------
