@@ -2284,6 +2284,42 @@ mod tests {
         assert!(app.state.as_ref().unwrap().modal.is_none());
     }
 
+    #[tokio::test]
+    async fn cycle_mode_action_dispatches_from_the_reducer() {
+        // Covers the Action::CycleMode arm (set_mode early-returns without
+        // a live handle; the arm and next_mode still execute).
+        let mut app = mk_app();
+        app.apply_action(Action::CycleMode).await;
+        // No error, no modal — a pure no-op without a connection.
+        assert!(app.state.as_ref().unwrap().modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn destroy_without_a_session_reports_instead_of_opening_the_modal() {
+        let mut app = App::new("ws://test".into(), "tok".into());
+        app.state = Some(AppState::new(AuthOkMsg {
+            identity: MessageIdentity {
+                sub: "u".into(),
+                name: None,
+                kind: IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+            capabilities: None,
+            providers: None,
+        }));
+        app.state.as_mut().unwrap().prompt.insert_str("/destroy");
+        app.submit_prompt().await;
+        assert!(app.state.as_ref().unwrap().modal.is_none());
+        assert!(app
+            .state
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("no session focused")));
+    }
+
     #[test]
     fn next_mode_cycles_conservatively() {
         assert_eq!(

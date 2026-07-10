@@ -677,6 +677,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_uses_the_production_timeout_wrapper() {
+        // Covers the `request()` → `request_with_timeout(REQUEST_TIMEOUT)`
+        // delegation: complete the request from "the daemon" side so it
+        // resolves long before the 30s production deadline.
+        let (handle, _out_rx) = dead_end_handle();
+        let registry = handle.registry.clone();
+        let pending = handle.request(ClientMessage::SessionList { id: "r-4".into() });
+        let answer = async {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            registry.complete("r-4", crate::request::RequestOutcome::Ok(None));
+        };
+        let (outcome, ()) = tokio::join!(pending, answer);
+        assert!(matches!(
+            outcome.unwrap(),
+            crate::request::RequestOutcome::Ok(None)
+        ));
+    }
+
+    #[tokio::test]
     async fn timed_out_request_is_deregistered() {
         // After a timeout the registry entry is gone, so a late daemon
         // response is dropped instead of hitting a dead oneshot.
