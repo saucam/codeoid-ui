@@ -34,6 +34,11 @@ const TICK: Duration = Duration::from_millis(100);
 /// Reconnect budget. Beyond this we give up and surface a terminal error.
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
+/// Cap on how many already-queued daemon events one loop iteration absorbs
+/// before redrawing. High enough to swallow any realistic delta burst in a
+/// single draw, low enough that terminal input can't be starved.
+const MAX_COALESCED_EVENTS: usize = 256;
+
 /// Cap on messages buffered while disconnected, so a long outage can't
 /// grow the queue without bound. Matches the web client's `MAX_QUEUED`.
 const MAX_QUEUED_SENDS: usize = 200;
@@ -206,11 +211,47 @@ impl App {
                 return Ok(false);
             }
 
+            // Coalesce: drain daemon events that are ALREADY queued before
+            // redrawing, so a burst of streaming deltas costs one draw
+            // (and one scrollback rebuild) instead of one per event. A
+            // fast token stream at 30–50 deltas/s otherwise re-renders the
+            // transcript 30–50×/s, which is exactly when the UI needs to
+            // stay responsive. Bounded so terminal input is never starved
+            // by a pathological flood.
+            let mut drained = 0usize;
+            while drained < MAX_COALESCED_EVENTS {
+                let next = match self.daemon_events.as_mut() {
+                    Some(events) => events.try_recv(),
+                    None => break,
+                };
+                let Ok(ev) = next else { break };
+                if matches!(ev, StreamEvent::Closed | StreamEvent::Errored(_)) {
+                    // Same exit path as the select arm above.
+                    if let Some(state) = self.state.as_mut() {
+                        match &ev {
+                            StreamEvent::Closed => {
+                                state.record_error("daemon closed the connection");
+                            }
+                            StreamEvent::Errored(err) => {
+                                state.record_error(format!("daemon error: {err}"));
+                            }
+                            StreamEvent::Daemon(_) => {}
+                        }
+                    }
+                    return Ok(true);
+                }
+                self.update(AppEvent::Net(ev)).await;
+                if self.quit_requested {
+                    return Ok(false);
+                }
+                drained += 1;
+            }
+
             // Redraw policy: anything user-initiated or daemon-driven
             // marks the UI dirty. Ticks only redraw if an animation is
             // actually running — otherwise we'd repaint the screen 10×/s
             // for no reason, destroying native terminal text selection.
-            dirty = if is_tick {
+            dirty = if is_tick && drained == 0 {
                 self.state.as_ref().is_some_and(needs_animation_frame)
             } else {
                 true
@@ -2437,6 +2478,57 @@ mod tests {
             .await
             .unwrap();
         assert!(!outcome, "q during backoff must report a clean quit");
+    }
+
+    #[tokio::test]
+    async fn event_loop_drains_queued_daemon_events_before_closing() {
+        use codeoid_protocol::{MessageRole, SessionMessage};
+
+        let mut app = mk_app();
+        let (tx, rx) = mpsc::channel(64);
+        app.daemon_events = Some(rx);
+
+        let msg = |i: usize| SessionMessage {
+            session_id: "s1".into(),
+            message_id: format!("m{i}"),
+            role: MessageRole::Assistant,
+            content: format!("chunk {i}"),
+            parts: None,
+            identity: MessageIdentity {
+                sub: "agent".into(),
+                name: None,
+                kind: IdentityType::Agent,
+            },
+            tool: None,
+            metadata: None,
+            timestamp: "t".into(),
+        };
+
+        // A queued burst (streaming deltas) followed by the socket dying.
+        for i in 0..5 {
+            tx.send(StreamEvent::Daemon(DaemonMessage::SessionMessage(msg(i))))
+                .await
+                .unwrap();
+        }
+        tx.send(StreamEvent::Closed).await.unwrap();
+
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        // No tty in tests: a forever-pending terminal-event stream.
+        let mut term_events = futures_util::stream::pending::<std::io::Result<CtEvent>>();
+        let mut ticker = interval(TICK);
+        let disconnected = app
+            .event_loop(&mut terminal, &mut term_events, &mut ticker)
+            .await
+            .unwrap();
+
+        assert!(disconnected, "Closed must unwind the loop for reconnect");
+        // The coalescing drain absorbed the whole burst (no event lost,
+        // no early exit) before hitting Closed.
+        assert_eq!(
+            app.state.as_ref().unwrap().messages.messages("s1").len(),
+            5,
+            "every queued broadcast applied before the drain hit Closed"
+        );
     }
 
     #[test]

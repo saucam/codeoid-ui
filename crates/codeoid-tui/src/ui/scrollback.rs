@@ -259,6 +259,12 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     state.note_total_rendered(total_rendered);
 
     let max_y = total_rendered.saturating_sub(viewport_rows);
+    // Write the clamp back: `scroll_to_top` parks the offset at usize::MAX
+    // and holding ↑ at the top keeps saturating upward — without this,
+    // every subsequent ScrollDown is a dead decrement somewhere in the
+    // ~10^19 range (scroll-down "stops working" and the ↑N hint shows a
+    // garbage number).
+    state.scroll_offset = state.scroll_offset.min(max_y);
     let y = max_y.saturating_sub(state.scroll_offset);
 
     // Hand ratatui only the logical lines that intersect the viewport,
@@ -860,6 +866,34 @@ mod tests {
             !text.contains("LINE39"),
             "the latest line must be off-screen when scrolled to the top"
         );
+    }
+
+    #[test]
+    fn scroll_offset_clamps_to_content_so_scroll_down_recovers() {
+        let mut state = mk_state();
+        state.sessions.upsert(mk_session("s1"));
+        for i in 0..40 {
+            state
+                .messages
+                .apply_message(user_msg("s1", &format!("m{i}"), &format!("LINE{i:02}")));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
+
+        // `g`/Home parks the offset at usize::MAX; the render must clamp
+        // it back to the real content height…
+        state.scroll_to_top();
+        terminal.draw(|f| render(f, f.area(), &mut state)).unwrap();
+        let max_y = state.scroll_offset;
+        assert!(
+            max_y > 0 && max_y < usize::MAX,
+            "offset clamped to content height, got {max_y}"
+        );
+
+        // …so scroll-down actually moves again (the old bug: the offset
+        // sat ~2^64 rows above the top and every down-tick was dead).
+        state.scroll_down(5);
+        assert_eq!(state.scroll_offset, max_y - 5);
     }
 
     #[test]

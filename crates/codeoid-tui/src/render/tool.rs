@@ -34,6 +34,15 @@ const MAX_BODY_LINES_VERBOSE: usize = 40;
 /// calls. Press `v` in transcript focus to flip to verbose.
 const MAX_BODY_LINES_COLLAPSED: usize = 8;
 
+/// Hard ceiling on the bytes fed to the ANSI parser per body render.
+/// The line cap below normally keeps parses tiny, but a single
+/// `\r`-rewritten progress line (pip/cargo download bars) can accumulate
+/// megabytes with zero newlines. Animating blocks bypass the render cache
+/// and re-render at 10 Hz — an unbounded parse there is a CPU fire.
+/// When the ceiling hits we keep the TAIL: `\r` semantics mean the final
+/// rewrite is what a terminal would show anyway.
+const MAX_PARSE_BYTES: usize = 256 * 1024;
+
 /// Render a tool invocation. `indent` is the margin applied to the
 /// header; body content sits at `indent + "  "` so it reads as a
 /// continuation.
@@ -204,8 +213,9 @@ pub fn render_tool_block(
 
     // Output body — ANSI-parsed so colors survive. Prepend our indent
     // to each line's existing spans so wrap still happens past the margin.
-    let body = body_lines(tool);
-    let total_body = body.len();
+    // The parse itself is capped at `max_body` lines: only what we show is
+    // parsed, the rest is a newline count (`total_body`).
+    let (body, total_body) = body_lines(tool, max_body);
     let shown: Vec<Line<'static>> = body.into_iter().take(max_body).collect();
     for line in shown {
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 1);
@@ -242,31 +252,68 @@ pub fn render_tool_block(
 }
 
 /// The body rows (after the header) — progress messages, completed
-/// output, cancellation messages. All text is run through the ANSI
-/// parser so git/cargo/npm colors survive.
-fn body_lines(tool: &ToolInfo) -> Vec<Line<'static>> {
+/// output, cancellation messages, run through the ANSI parser so
+/// git/cargo/npm colors survive. Returns `(lines, total)` where `lines`
+/// holds at most `keep` parsed rows and `total` is the full logical line
+/// count — the parse cost is O(shown), not O(accumulated output), which
+/// matters because animating blocks re-render at 10 Hz.
+fn body_lines(tool: &ToolInfo, keep: usize) -> (Vec<Line<'static>>, usize) {
+    let capped = |text: &str| {
+        let (slice, total) = cap_lines(text, keep);
+        (parse_ansi(slice), total)
+    };
     match &tool.state {
         ToolState::Executing {
             progress: Some(p), ..
-        } => parse_ansi(p),
+        } => capped(p),
         ToolState::Completed {
             output: Some(output),
             ..
-        } => parse_ansi(output),
+        } => capped(output),
         ToolState::Cancelled {
             message: Some(m), ..
         } => {
-            let mut out = parse_ansi(m);
+            let (mut out, total) = capped(m);
             if out.is_empty() {
                 out.push(Line::from(Span::styled(
                     "cancelled",
                     Style::default().fg(Color::Red),
                 )));
+                return (out, 1);
             }
-            out
+            (out, total)
         }
-        _ => Vec::new(),
+        _ => (Vec::new(), 0),
     }
+}
+
+/// Slice `text` to its first `keep` logical lines (plus a byte ceiling for
+/// pathological single lines) and count the total lines — one byte scan,
+/// zero allocations. Line semantics match [`parse_ansi`]: only `\n`
+/// creates a new line (`\r` rewrites the current one).
+fn cap_lines(text: &str, keep: usize) -> (&str, usize) {
+    let mut newlines = 0usize;
+    let mut cut = None;
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            newlines += 1;
+            if newlines == keep && cut.is_none() {
+                cut = Some(i + 1);
+            }
+        }
+    }
+    let total = newlines + usize::from(!text.is_empty() && !text.ends_with('\n'));
+    let mut slice = cut.map_or(text, |c| &text[..c]);
+    if slice.len() > MAX_PARSE_BYTES {
+        // A `\r`-progress line megabytes long with no newlines: parse only
+        // the tail — the final rewrite is what a terminal would display.
+        let mut start = slice.len() - MAX_PARSE_BYTES;
+        while !slice.is_char_boundary(start) {
+            start += 1;
+        }
+        slice = &slice[start..];
+    }
+    (slice, total)
 }
 
 fn header_icon(state: &ToolState, spinner: &str) -> (String, Style) {
@@ -394,5 +441,77 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let prefix: String = s.chars().take(max).collect();
         format!("{prefix}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codeoid_protocol::{ToolInfo, ToolState};
+
+    #[test]
+    fn cap_lines_keeps_head_and_counts_all() {
+        let text = "l1\nl2\nl3\nl4\nl5";
+        let (slice, total) = cap_lines(text, 2);
+        assert_eq!(slice, "l1\nl2\n");
+        assert_eq!(total, 5);
+        // Under the cap: whole text untouched.
+        let (slice, total) = cap_lines(text, 10);
+        assert_eq!(slice, text);
+        assert_eq!(total, 5);
+        // Trailing newline doesn't add a phantom line; empty is zero.
+        assert_eq!(cap_lines("a\nb\n", 10).1, 2);
+        assert_eq!(cap_lines("", 10).1, 0);
+    }
+
+    #[test]
+    fn cap_lines_tails_a_monster_single_line() {
+        // A `\r`-rewritten progress line with no newlines: parse only the
+        // tail so a 10 Hz animation repaint can't be O(accumulated bytes).
+        let text = "x".repeat(MAX_PARSE_BYTES + 50_000);
+        let (slice, total) = cap_lines(&text, 8);
+        assert_eq!(total, 1);
+        assert_eq!(slice.len(), MAX_PARSE_BYTES);
+        assert!(text.ends_with(slice));
+    }
+
+    #[test]
+    fn body_lines_parses_only_what_is_shown_but_reports_exact_total() {
+        let progress: String = (0..100).map(|i| format!("row {i}\n")).collect();
+        let tool = ToolInfo {
+            tool_id: "t1".into(),
+            name: "Bash".into(),
+            state: ToolState::Executing {
+                progress: Some(progress),
+                elapsed_ms: Some(10),
+            },
+        };
+        let (lines, total) = body_lines(&tool, 8);
+        assert_eq!(lines.len(), 8, "parse capped at what the block shows");
+        assert_eq!(total, 100, "the +N-more label still gets the real count");
+    }
+
+    #[test]
+    fn render_tool_block_truncation_label_matches_capped_parse() {
+        let progress: String = (0..30).map(|i| format!("out {i}\n")).collect();
+        let tool = ToolInfo {
+            tool_id: "t1".into(),
+            name: "Bash".into(),
+            state: ToolState::Executing {
+                progress: Some(progress),
+                elapsed_ms: Some(10),
+            },
+        };
+        let lines = render_tool_block(&tool, 0, "", false, false);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.clone().into_owned())
+            .collect();
+        // Collapsed cap is 8 → 22 hidden.
+        assert!(text.contains("22 more line(s) hidden"), "{text}");
+        // The shown rows are the HEAD of the output, as before the cap.
+        assert!(text.contains("out 0"));
+        assert!(!text.contains("out 29"));
     }
 }
