@@ -282,3 +282,64 @@ fn session_set_provider_serializes_camel_case() {
     assert_eq!(json["providerId"], "pi");
     assert_eq!(msg.request_id(), "1");
 }
+
+// ── scrollback.paging (tail-first attach + history pages) ────────────────────
+
+#[test]
+fn scrollback_replay_tail_fields_parse_and_stay_backwards_compatible() {
+    use codeoid_protocol::DaemonMessage;
+
+    // New daemon: tail window with more history behind it.
+    let json =
+        r#"{"type":"scrollback.replay","sessionId":"s1","messages":[],"tail":true,"hasMore":true}"#;
+    let msg: DaemonMessage = serde_json::from_str(json).unwrap();
+    match msg {
+        DaemonMessage::ScrollbackReplay { tail, has_more, .. } => {
+            assert_eq!(tail, Some(true));
+            assert_eq!(has_more, Some(true));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+
+    // Old daemon: fields absent — must still parse (None).
+    let legacy = r#"{"type":"scrollback.replay","sessionId":"s1","messages":[]}"#;
+    let msg: DaemonMessage = serde_json::from_str(legacy).unwrap();
+    match msg {
+        DaemonMessage::ScrollbackReplay { tail, has_more, .. } => {
+            assert_eq!(tail, None);
+            assert_eq!(has_more, None);
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
+#[test]
+fn scrollback_page_wire_shapes() {
+    use codeoid_protocol::{ClientMessage, DaemonMessage};
+
+    // Request: camelCase anchor, optional maxBytes elided.
+    let req = ClientMessage::ScrollbackPage {
+        id: "r1".into(),
+        session_id: "s1".into(),
+        before_message_id: "m-oldest".into(),
+        max_bytes: None,
+    };
+    assert_eq!(req.request_id(), "r1");
+    let json = serde_json::to_value(&req).unwrap();
+    assert_eq!(json["type"], "scrollback.page");
+    assert_eq!(json["beforeMessageId"], "m-oldest");
+    assert!(json.get("maxBytes").is_none());
+
+    // Result: parses with hasMore + source.
+    let res = r#"{"type":"scrollback.page.result","requestId":"r1","sessionId":"s1","messages":[],"hasMore":false,"source":"transcript"}"#;
+    let msg: DaemonMessage = serde_json::from_str(res).unwrap();
+    match msg {
+        DaemonMessage::ScrollbackPageResult {
+            has_more, source, ..
+        } => {
+            assert!(!has_more);
+            assert_eq!(source, "transcript");
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}

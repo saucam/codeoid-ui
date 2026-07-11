@@ -192,7 +192,7 @@ pub async fn connect(url: &str, token: &str) -> Result<Connected> {
             "type": "auth",
             "token": token,
             "protocolVersion": codeoid_protocol::PROTOCOL_VERSION,
-            "capabilities": ["parts", "ui.dialogs"],
+            "capabilities": ["parts", "ui.dialogs", "scrollback.paging"],
             "client": format!("codeoid-tui/{}", env!("CARGO_PKG_VERSION")),
         });
         w.send(WsMessage::Text(auth_frame.to_string().into()))
@@ -515,6 +515,7 @@ fn daemon_kind(msg: &DaemonMessage) -> &'static str {
         DaemonMessage::SessionInfoUpdate { .. } => "session.info_update",
         DaemonMessage::ScrollbackReplay { .. } => "scrollback.replay",
         DaemonMessage::SessionSearchResult { .. } => "session.search.result",
+        DaemonMessage::ScrollbackPageResult { .. } => "scrollback.page.result",
         DaemonMessage::ClaudeConfigResult { .. } => "claude.config.result",
         DaemonMessage::SessionExportResult { .. } => "session.export.result",
         DaemonMessage::SessionImportResult { .. } => "session.import.result",
@@ -557,6 +558,7 @@ fn client_kind(msg: &ClientMessage) -> &'static str {
         ClientMessage::SessionSetModel { .. } => "session.set_model",
         ClientMessage::SessionSetProvider { .. } => "session.set_provider",
         ClientMessage::SessionFork { .. } => "session.fork",
+        ClientMessage::ScrollbackPage { .. } => "scrollback.page",
         ClientMessage::SessionRename { .. } => "session.rename",
         ClientMessage::ClaudeConfig { .. } => "claude.config",
         ClientMessage::SessionExport { .. } => "session.export",

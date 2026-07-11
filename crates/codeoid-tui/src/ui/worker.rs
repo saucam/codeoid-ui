@@ -288,7 +288,23 @@ fn scroll_hint(state: &AppState) -> Line<'static> {
         spans.push(Span::styled("  ·  ", Style::default().fg(Color::DarkGray)));
     }
     spans.push(Span::styled(
-        format!("scrolled ↑{}", state.scroll_offset),
+        {
+            // Older-history affordance (`scrollback.paging`): tell the user
+            // more exists above, and show fetch progress inline.
+            let focused = state.sessions.focused_id();
+            let paging_here = matches!(
+                (&state.paging_in_flight, focused),
+                (Some((sid, _)), Some(f)) if sid == f
+            );
+            let has_older = focused.is_some_and(|f| state.has_older_history.contains(f));
+            if paging_here {
+                format!("scrolled ↑{} · loading older…", state.scroll_offset)
+            } else if has_older {
+                format!("scrolled ↑{} · ↑ more history", state.scroll_offset)
+            } else {
+                format!("scrolled ↑{}", state.scroll_offset)
+            }
+        },
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::ITALIC),

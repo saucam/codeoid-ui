@@ -180,6 +180,19 @@ pub enum ClientMessage {
         provider_id: Option<String>,
     },
 
+    /// Fetch history OLDER than a message the client already holds
+    /// (`scrollback.paging`). Anchored by message id — ids survive daemon
+    /// restarts, seq cursors don't. Answered with `scrollback.page.result`.
+    #[serde(rename = "scrollback.page", rename_all = "camelCase")]
+    ScrollbackPage {
+        id: String,
+        session_id: String,
+        /// The OLDEST message id the client currently holds.
+        before_message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_bytes: Option<u64>,
+    },
+
     #[serde(rename = "session.set_model", rename_all = "camelCase")]
     SessionSetModel {
         id: String,
@@ -264,6 +277,7 @@ impl ClientMessage {
             | Self::SessionSearch { id, .. }
             | Self::SessionSetProvider { id, .. }
             | Self::SessionFork { id, .. }
+            | Self::ScrollbackPage { id, .. }
             | Self::SessionSetModel { id, .. }
             | Self::SessionRename { id, .. }
             | Self::ClaudeConfig { id, .. }
