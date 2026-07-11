@@ -49,6 +49,10 @@ pub struct App {
     /// order on reconnect so a message composed during a blip is never
     /// silently lost (mirrors `pendingSends` in the web client).
     pending_sends: Vec<ClientMessage>,
+    /// Base unit of the reconnect exponential backoff (attempt N waits
+    /// `unit × 2^(N-1)`, capped at 30 units). One second in production;
+    /// tests shrink it to milliseconds so the budget path runs in CI.
+    reconnect_backoff_unit: Duration,
 }
 
 impl App {
@@ -62,6 +66,7 @@ impl App {
             daemon_events: None,
             quit_requested: false,
             pending_sends: Vec::new(),
+            reconnect_backoff_unit: Duration::from_secs(1),
         }
     }
 
@@ -132,12 +137,19 @@ impl App {
 
     /// Inner loop. Returns `Ok(true)` if the connection dropped (caller
     /// should reconnect) and `Ok(false)` if we exited cleanly (quit).
-    async fn event_loop(
+    /// Generic over the render backend and the terminal-event source so
+    /// tests can drive it on a `TestBackend` + injected event stream
+    /// (crossterm's `EventStream` needs a real tty).
+    async fn event_loop<B, E>(
         &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-        term_events: &mut EventStream,
+        terminal: &mut Terminal<B>,
+        term_events: &mut E,
         ticker: &mut Interval,
-    ) -> Result<bool> {
+    ) -> Result<bool>
+    where
+        B: ratatui::backend::Backend,
+        E: futures_util::Stream<Item = std::io::Result<CtEvent>> + Unpin,
+    {
         // First frame — always paint.
         let mut dirty = true;
 
@@ -859,23 +871,35 @@ impl App {
 
     /// Returns `Ok(true)` when reconnected, `Ok(false)` when the user quit
     /// while we were down, `Err` when the attempt budget is exhausted.
-    async fn reconnect_with_backoff(
+    async fn reconnect_with_backoff<B, E>(
         &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-        term_events: &mut EventStream,
-    ) -> Result<bool> {
+        terminal: &mut Terminal<B>,
+        term_events: &mut E,
+    ) -> Result<bool>
+    where
+        B: ratatui::backend::Backend,
+        E: futures_util::Stream<Item = std::io::Result<CtEvent>> + Unpin,
+    {
         for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
-            let delay_secs = (1u64 << (attempt - 1)).min(30);
+            // Exponential backoff in units of `reconnect_backoff_unit` —
+            // 1s in production, milliseconds in tests so the full budget
+            // path runs in CI without a 31-second sleep.
+            let delay_units = (1u64 << (attempt - 1)).min(30);
+            let delay = self.reconnect_backoff_unit * u32::try_from(delay_units).unwrap_or(30);
             if let Some(state) = self.state.as_mut() {
                 state.connection = ConnectionState::Reconnecting {
                     attempt,
-                    next_attempt_in_secs: delay_secs,
+                    next_attempt_in_secs: delay.as_secs(),
                 };
                 terminal.draw(|f| ui::render(f, state))?;
             }
 
-            debug!(attempt, delay_secs, "reconnect attempt pending");
-            let deadline = Instant::now() + Duration::from_secs(delay_secs);
+            debug!(
+                attempt,
+                delay_ms = delay.as_millis() as u64,
+                "reconnect attempt pending"
+            );
+            let deadline = Instant::now() + delay;
             while Instant::now() < deadline {
                 // Keep draining terminal input during the wait: `q` /
                 // Ctrl+C must still quit (backoff totals ~30s — a deaf UI
@@ -883,7 +907,7 @@ impl App {
                 // is discarded rather than replaying into the prompt after
                 // reconnect.
                 tokio::select! {
-                    _ = sleep(Duration::from_millis(200)) => {
+                    _ = sleep(self.reconnect_backoff_unit.min(Duration::from_millis(200))) => {
                         if let Some(state) = self.state.as_mut() {
                             terminal.draw(|f| ui::render(f, state))?;
                         }
@@ -2336,6 +2360,83 @@ mod tests {
         );
         // Unknown mode must not jump to autonomous.
         assert_eq!(next_mode(None), SessionMode::Interactive);
+    }
+
+    #[tokio::test]
+    async fn destroy_rejection_is_surfaced_not_swallowed() {
+        // A live handle whose daemon never answers: cancelling the pending
+        // request (= socket death) must surface as "/destroy failed: …" in
+        // the footer instead of silently pretending the destroy worked.
+        let (handle, registry) = ClientHandle::detached_for_tests();
+        let mut app = mk_app();
+        app.handle = Some(handle);
+
+        let destroy = app.destroy_session("s1".to_string());
+        let cancel = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            registry.cancel_all();
+        };
+        tokio::join!(destroy, cancel);
+
+        assert!(app
+            .state
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("/destroy failed")));
+    }
+
+    #[tokio::test]
+    async fn reconnect_backoff_exhausts_its_budget_against_a_dead_daemon() {
+        // Nothing listens on this port — every connect attempt is refused
+        // instantly, so with a 1ms backoff unit the WHOLE 5-attempt budget
+        // (incl. the countdown redraws on a TestBackend) runs in
+        // milliseconds and ends in the terminal error.
+        let mut app = App::new("ws://127.0.0.1:9".into(), "tok".into());
+        app.state = Some(mk_state());
+        app.reconnect_backoff_unit = Duration::from_millis(1);
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut term_events = futures_util::stream::pending::<std::io::Result<CtEvent>>();
+
+        let outcome = app
+            .reconnect_with_backoff(&mut terminal, &mut term_events)
+            .await;
+        assert!(outcome.is_err(), "budget exhausted must surface as Err");
+        let err = outcome.unwrap_err().to_string();
+        assert!(err.contains("could not reconnect"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn reconnect_backoff_quits_on_q_and_discards_other_keys() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = App::new("ws://127.0.0.1:9".into(), "tok".into());
+        app.state = Some(mk_state());
+        // Generous unit so attempt 1's wait window is definitely open when
+        // the queued keys are polled.
+        app.reconnect_backoff_unit = Duration::from_millis(250);
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        // A stray letter first (must be DISCARDED, not typed into anything),
+        // then `q` — the loop must return Ok(false) = user quit.
+        let keys: Vec<std::io::Result<CtEvent>> = vec![
+            Ok(CtEvent::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(CtEvent::Key(KeyEvent::new(
+                KeyCode::Char('q'),
+                KeyModifiers::NONE,
+            ))),
+        ];
+        let mut term_events =
+            futures_util::stream::iter(keys).chain(futures_util::stream::pending());
+
+        let outcome = app
+            .reconnect_with_backoff(&mut terminal, &mut term_events)
+            .await
+            .unwrap();
+        assert!(!outcome, "q during backoff must report a clean quit");
     }
 
     #[test]

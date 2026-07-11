@@ -137,6 +137,26 @@ impl ClientHandle {
     pub fn next_request_id() -> String {
         Uuid::new_v4().to_string()
     }
+
+    /// Test-only: a handle wired to no socket. Sends are drained into the
+    /// void; requests hang until the returned registry completes or cancels
+    /// them (or the request timeout fires). Lets downstream crates (the
+    /// TUI) exercise their request/error paths without a daemon.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn detached_for_tests() -> (Self, RequestRegistry) {
+        let (tx, mut rx) = mpsc::channel::<Outbound>(64);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let registry = RequestRegistry::new();
+        let handle = Self {
+            tx,
+            registry: registry.clone(),
+            _reader: Arc::new(drain),
+            _writer: Arc::new(tokio::spawn(async {})),
+            _heartbeat: Arc::new(tokio::spawn(async {})),
+        };
+        (handle, registry)
+    }
 }
 
 /// Connect to a daemon, authenticate, and return a ready-to-use handle.
@@ -294,12 +314,6 @@ fn spawn_reader(
         // caller still awaiting a response instead of leaving them to hang
         // (the event loop awaits requests inline — a wedged oneshot would
         // freeze the UI until the request timeout).
-        struct CancelPendingOnExit(RequestRegistry);
-        impl Drop for CancelPendingOnExit {
-            fn drop(&mut self) {
-                self.0.cancel_all();
-            }
-        }
         let _cancel_guard = CancelPendingOnExit(registry.clone());
 
         while let Some(frame) = read.next().await {
@@ -511,6 +525,16 @@ fn daemon_kind(msg: &DaemonMessage) -> &'static str {
     }
 }
 
+/// Drop guard held by the reader task: however the task exits (clean close,
+/// socket error, panic), every pending request is cancelled so awaiting
+/// callers unblock immediately instead of waiting out their timeout.
+struct CancelPendingOnExit(RequestRegistry);
+impl Drop for CancelPendingOnExit {
+    fn drop(&mut self) {
+        self.0.cancel_all();
+    }
+}
+
 fn client_kind(msg: &ClientMessage) -> &'static str {
     match msg {
         ClientMessage::SessionCreate { .. } => "session.create",
@@ -693,6 +717,20 @@ mod tests {
             outcome.unwrap(),
             crate::request::RequestOutcome::Ok(None)
         ));
+    }
+
+    #[tokio::test]
+    async fn reader_exit_guard_cancels_pending_requests_on_drop() {
+        // The guard is what turns "reader task died" into instant
+        // RequestCancelled for every in-flight caller — including on panic
+        // unwinds, which no explicit call at the exit points would cover.
+        let registry = crate::request::RequestRegistry::new();
+        let rx = registry.register("r-guard".into());
+        {
+            let _guard = super::CancelPendingOnExit(registry.clone());
+            // guard drops here — simulating any reader-task exit
+        }
+        assert!(rx.await.is_err(), "pending oneshot must be cancelled");
     }
 
     #[tokio::test]
