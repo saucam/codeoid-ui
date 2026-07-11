@@ -20,6 +20,11 @@ use uuid::Uuid;
 use crate::error::{ClientError, Result};
 use crate::request::{into_result, RequestOutcome, RequestRegistry};
 
+/// Upper bound on how long [`ClientHandle::request`] waits for a response.
+/// Callers await requests inside UI event loops — an unbounded wait on a
+/// wedged daemon would freeze the interface with no way to recover.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Unsolicited events that flow from the daemon into the TUI event loop.
 ///
 /// This intentionally excludes [`DaemonMessage::AuthOk`] (consumed during
@@ -77,17 +82,40 @@ impl ClientHandle {
 
     /// Send a [`ClientMessage`] and await its correlated response.
     ///
+    /// Bounded: resolves with [`ClientError::RequestTimeout`] if the daemon
+    /// hasn't answered within [`REQUEST_TIMEOUT`], and with
+    /// [`ClientError::RequestCancelled`] the moment the reader task dies
+    /// (socket drop cancels every pending request) — callers awaiting inside
+    /// a UI event loop are never wedged forever.
+    ///
     /// Note: the caller must construct `msg` with a unique id. Use
     /// [`Self::next_request_id`] if you don't have one handy.
     pub async fn request(&self, msg: ClientMessage) -> Result<RequestOutcome> {
+        self.request_with_timeout(msg, REQUEST_TIMEOUT).await
+    }
+
+    /// [`Self::request`] with an explicit deadline — split out so tests can
+    /// exercise the timeout path without waiting out the production value.
+    async fn request_with_timeout(
+        &self,
+        msg: ClientMessage,
+        timeout: Duration,
+    ) -> Result<RequestOutcome> {
         let id = msg.request_id().to_string();
         let rx = self.registry.register(id.clone());
         self.tx
             .send(Outbound::Message(msg))
             .await
             .map_err(|_| ClientError::ChannelClosed)?;
-        rx.await
-            .map_err(|_| ClientError::RequestCancelled(id.clone()))
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(outcome) => outcome.map_err(|_| ClientError::RequestCancelled(id.clone())),
+            Err(_) => {
+                // Drop our side of the pending entry so a late response
+                // doesn't hit a dead oneshot.
+                self.registry.cancel(&id);
+                Err(ClientError::RequestTimeout(id))
+            }
+        }
     }
 
     /// Convenience: request and unwrap to a JSON payload, bubbling typed
@@ -108,6 +136,26 @@ impl ClientHandle {
     #[must_use]
     pub fn next_request_id() -> String {
         Uuid::new_v4().to_string()
+    }
+
+    /// Test-only: a handle wired to no socket. Sends are drained into the
+    /// void; requests hang until the returned registry completes or cancels
+    /// them (or the request timeout fires). Lets downstream crates (the
+    /// TUI) exercise their request/error paths without a daemon.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn detached_for_tests() -> (Self, RequestRegistry) {
+        let (tx, mut rx) = mpsc::channel::<Outbound>(64);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let registry = RequestRegistry::new();
+        let handle = Self {
+            tx,
+            registry: registry.clone(),
+            _reader: Arc::new(drain),
+            _writer: Arc::new(tokio::spawn(async {})),
+            _heartbeat: Arc::new(tokio::spawn(async {})),
+        };
+        (handle, registry)
     }
 }
 
@@ -262,6 +310,12 @@ fn spawn_reader(
     base: Instant,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        // Whatever way this task exits, the socket is gone: unblock every
+        // caller still awaiting a response instead of leaving them to hang
+        // (the event loop awaits requests inline — a wedged oneshot would
+        // freeze the UI until the request timeout).
+        let _cancel_guard = CancelPendingOnExit(registry.clone());
+
         while let Some(frame) = read.next().await {
             let frame = match frame {
                 Ok(f) => f,
@@ -471,6 +525,16 @@ fn daemon_kind(msg: &DaemonMessage) -> &'static str {
     }
 }
 
+/// Drop guard held by the reader task: however the task exits (clean close,
+/// socket error, panic), every pending request is cancelled so awaiting
+/// callers unblock immediately instead of waiting out their timeout.
+struct CancelPendingOnExit(RequestRegistry);
+impl Drop for CancelPendingOnExit {
+    fn drop(&mut self) {
+        self.0.cancel_all();
+    }
+}
+
 fn client_kind(msg: &ClientMessage) -> &'static str {
     match msg {
         ClientMessage::SessionCreate { .. } => "session.create",
@@ -584,5 +648,103 @@ mod tests {
             }),
             "session.fork"
         );
+    }
+
+    /// A handle whose writer never answers — for exercising the bounded-wait
+    /// guarantees without a live socket.
+    fn dead_end_handle() -> (
+        super::ClientHandle,
+        tokio::sync::mpsc::Receiver<super::Outbound>,
+    ) {
+        let (tx, out_rx) = tokio::sync::mpsc::channel(8);
+        let handle = super::ClientHandle {
+            tx,
+            registry: crate::request::RequestRegistry::new(),
+            _reader: std::sync::Arc::new(tokio::spawn(async {})),
+            _writer: std::sync::Arc::new(tokio::spawn(async {})),
+            _heartbeat: std::sync::Arc::new(tokio::spawn(async {})),
+        };
+        (handle, out_rx)
+    }
+
+    #[tokio::test]
+    async fn request_times_out_instead_of_hanging_forever() {
+        // The daemon never answers: the request must resolve with
+        // RequestTimeout, not wedge the caller (the TUI awaits requests
+        // inside its event loop).
+        let (handle, _out_rx) = dead_end_handle();
+        let msg = ClientMessage::SessionList { id: "r-1".into() };
+        let err = handle
+            .request_with_timeout(msg, std::time::Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::ClientError::RequestTimeout(id) if id == "r-1"));
+    }
+
+    #[tokio::test]
+    async fn socket_death_cancels_pending_requests_immediately() {
+        // Simulates the reader task exiting (its Drop guard fires
+        // cancel_all): the in-flight request unblocks with
+        // RequestCancelled at once, long before its timeout.
+        let (handle, _out_rx) = dead_end_handle();
+        let registry = handle.registry.clone();
+        let msg = ClientMessage::SessionList { id: "r-2".into() };
+        let pending = handle.request_with_timeout(msg, std::time::Duration::from_secs(30));
+        let cancel = async {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            registry.cancel_all();
+        };
+        let (outcome, ()) = tokio::join!(pending, cancel);
+        assert!(
+            matches!(outcome.unwrap_err(), crate::error::ClientError::RequestCancelled(id) if id == "r-2")
+        );
+    }
+
+    #[tokio::test]
+    async fn request_uses_the_production_timeout_wrapper() {
+        // Covers the `request()` → `request_with_timeout(REQUEST_TIMEOUT)`
+        // delegation: complete the request from "the daemon" side so it
+        // resolves long before the 30s production deadline.
+        let (handle, _out_rx) = dead_end_handle();
+        let registry = handle.registry.clone();
+        let pending = handle.request(ClientMessage::SessionList { id: "r-4".into() });
+        let answer = async {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            registry.complete("r-4", crate::request::RequestOutcome::Ok(None));
+        };
+        let (outcome, ()) = tokio::join!(pending, answer);
+        assert!(matches!(
+            outcome.unwrap(),
+            crate::request::RequestOutcome::Ok(None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn reader_exit_guard_cancels_pending_requests_on_drop() {
+        // The guard is what turns "reader task died" into instant
+        // RequestCancelled for every in-flight caller — including on panic
+        // unwinds, which no explicit call at the exit points would cover.
+        let registry = crate::request::RequestRegistry::new();
+        let rx = registry.register("r-guard".into());
+        {
+            let _guard = super::CancelPendingOnExit(registry.clone());
+            // guard drops here — simulating any reader-task exit
+        }
+        assert!(rx.await.is_err(), "pending oneshot must be cancelled");
+    }
+
+    #[tokio::test]
+    async fn timed_out_request_is_deregistered() {
+        // After a timeout the registry entry is gone, so a late daemon
+        // response is dropped instead of hitting a dead oneshot.
+        let (handle, _out_rx) = dead_end_handle();
+        let msg = ClientMessage::SessionList { id: "r-3".into() };
+        let _ = handle
+            .request_with_timeout(msg, std::time::Duration::from_millis(10))
+            .await;
+        let delivered = handle
+            .registry
+            .complete("r-3", crate::request::RequestOutcome::Ok(None));
+        assert!(!delivered, "late response found a registered waiter");
     }
 }

@@ -67,7 +67,18 @@ impl RequestRegistry {
         }
     }
 
-    /// Cancel every pending request — used on shutdown.
+    /// Cancel a single pending request — used when the caller stops waiting
+    /// (timeout) so a late response doesn't hit a dead oneshot.
+    pub fn cancel(&self, request_id: &str) {
+        self.inner
+            .lock()
+            .expect("registry mutex poisoned")
+            .remove(request_id);
+    }
+
+    /// Cancel every pending request — used on shutdown and when the reader
+    /// task exits (socket death), so awaiting callers unblock immediately
+    /// instead of waiting out their timeout.
     pub fn cancel_all(&self) {
         let mut map = self.inner.lock().expect("registry mutex poisoned");
         map.clear();

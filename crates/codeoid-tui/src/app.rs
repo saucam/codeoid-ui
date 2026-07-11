@@ -49,6 +49,10 @@ pub struct App {
     /// order on reconnect so a message composed during a blip is never
     /// silently lost (mirrors `pendingSends` in the web client).
     pending_sends: Vec<ClientMessage>,
+    /// Base unit of the reconnect exponential backoff (attempt N waits
+    /// `unit × 2^(N-1)`, capped at 30 units). One second in production;
+    /// tests shrink it to milliseconds so the budget path runs in CI.
+    reconnect_backoff_unit: Duration,
 }
 
 impl App {
@@ -62,6 +66,7 @@ impl App {
             daemon_events: None,
             quit_requested: false,
             pending_sends: Vec::new(),
+            reconnect_backoff_unit: Duration::from_secs(1),
         }
     }
 
@@ -99,19 +104,28 @@ impl App {
             }
 
             // Connection is gone. Attempt a bounded reconnect.
-            if let Err(fatal) = self.reconnect_with_backoff(terminal).await {
-                if let Some(state) = self.state.as_mut() {
-                    state.connection = ConnectionState::Failed {
-                        reason: fatal.to_string(),
-                    };
-                    state.record_error(format!("disconnected: {fatal}"));
-                    // One final draw so the user can read the failure.
-                    let state_mut: &mut AppState = state;
-                    terminal.draw(|f| ui::render(f, state_mut))?;
+            match self
+                .reconnect_with_backoff(terminal, &mut term_events)
+                .await
+            {
+                Ok(true) => {}
+                // User quit while we were down — exit without the
+                // failure-pill theatrics.
+                Ok(false) => break 'outer,
+                Err(fatal) => {
+                    if let Some(state) = self.state.as_mut() {
+                        state.connection = ConnectionState::Failed {
+                            reason: fatal.to_string(),
+                        };
+                        state.record_error(format!("disconnected: {fatal}"));
+                        // One final draw so the user can read the failure.
+                        let state_mut: &mut AppState = state;
+                        terminal.draw(|f| ui::render(f, state_mut))?;
+                    }
+                    // Brief pause so the failure pill is legible.
+                    sleep(Duration::from_secs(2)).await;
+                    break 'outer;
                 }
-                // Brief pause so the failure pill is legible.
-                sleep(Duration::from_secs(2)).await;
-                break 'outer;
             }
         }
 
@@ -123,12 +137,19 @@ impl App {
 
     /// Inner loop. Returns `Ok(true)` if the connection dropped (caller
     /// should reconnect) and `Ok(false)` if we exited cleanly (quit).
-    async fn event_loop(
+    /// Generic over the render backend and the terminal-event source so
+    /// tests can drive it on a `TestBackend` + injected event stream
+    /// (crossterm's `EventStream` needs a real tty).
+    async fn event_loop<B, E>(
         &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-        term_events: &mut EventStream,
+        terminal: &mut Terminal<B>,
+        term_events: &mut E,
         ticker: &mut Interval,
-    ) -> Result<bool> {
+    ) -> Result<bool>
+    where
+        B: ratatui::backend::Backend,
+        E: futures_util::Stream<Item = std::io::Result<CtEvent>> + Unpin,
+    {
         // First frame — always paint.
         let mut dirty = true;
 
@@ -213,6 +234,9 @@ impl App {
                     }
                     Some(crate::state::Modal::UiDialog(_)) => {
                         crate::keymap::ModalKind::UiDialogChoice
+                    }
+                    Some(crate::state::Modal::ConfirmDestroy { .. }) => {
+                        crate::keymap::ModalKind::ConfirmDestroy
                     }
                     Some(_) => crate::keymap::ModalKind::Generic,
                     None => crate::keymap::ModalKind::None,
@@ -320,7 +344,8 @@ impl App {
             Action::Approve => self.approve(true).await,
             Action::Deny => self.approve(false).await,
             Action::CycleMode => {
-                info!("cycle mode: not yet implemented");
+                let next = next_mode(state.sessions.focused().and_then(|s| s.mode));
+                self.set_mode(next).await;
             }
             Action::ToggleHelp => {
                 state.modal = match state.modal {
@@ -330,6 +355,13 @@ impl App {
             }
             Action::DismissModal => {
                 state.modal = None;
+            }
+            Action::ConfirmDestroy => {
+                // Only reachable with the ConfirmDestroy modal open (the
+                // keymap gates `y` on ModalKind::ConfirmDestroy).
+                if let Some(Modal::ConfirmDestroy { session_id, .. }) = state.modal.take() {
+                    self.destroy_session(session_id).await;
+                }
             }
             Action::ScrollUp => state.scroll_up(1),
             Action::ScrollDown => state.scroll_down(1),
@@ -837,26 +869,57 @@ impl App {
         }
     }
 
-    async fn reconnect_with_backoff(
+    /// Returns `Ok(true)` when reconnected, `Ok(false)` when the user quit
+    /// while we were down, `Err` when the attempt budget is exhausted.
+    async fn reconnect_with_backoff<B, E>(
         &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ) -> Result<()> {
+        terminal: &mut Terminal<B>,
+        term_events: &mut E,
+    ) -> Result<bool>
+    where
+        B: ratatui::backend::Backend,
+        E: futures_util::Stream<Item = std::io::Result<CtEvent>> + Unpin,
+    {
         for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
-            let delay_secs = (1u64 << (attempt - 1)).min(30);
+            // Exponential backoff in units of `reconnect_backoff_unit` —
+            // 1s in production, milliseconds in tests so the full budget
+            // path runs in CI without a 31-second sleep.
+            let delay_units = (1u64 << (attempt - 1)).min(30);
+            let delay = self.reconnect_backoff_unit * u32::try_from(delay_units).unwrap_or(30);
             if let Some(state) = self.state.as_mut() {
                 state.connection = ConnectionState::Reconnecting {
                     attempt,
-                    next_attempt_in_secs: delay_secs,
+                    next_attempt_in_secs: delay.as_secs(),
                 };
                 terminal.draw(|f| ui::render(f, state))?;
             }
 
-            debug!(attempt, delay_secs, "reconnect attempt pending");
-            let deadline = Instant::now() + Duration::from_secs(delay_secs);
+            debug!(
+                attempt,
+                delay_ms = delay.as_millis() as u64,
+                "reconnect attempt pending"
+            );
+            let deadline = Instant::now() + delay;
             while Instant::now() < deadline {
-                sleep(Duration::from_millis(200)).await;
-                if let Some(state) = self.state.as_mut() {
-                    terminal.draw(|f| ui::render(f, state))?;
+                // Keep draining terminal input during the wait: `q` /
+                // Ctrl+C must still quit (backoff totals ~30s — a deaf UI
+                // that long reads as a hang), and anything else typed here
+                // is discarded rather than replaying into the prompt after
+                // reconnect.
+                tokio::select! {
+                    _ = sleep(self.reconnect_backoff_unit.min(Duration::from_millis(200))) => {
+                        if let Some(state) = self.state.as_mut() {
+                            terminal.draw(|f| ui::render(f, state))?;
+                        }
+                    }
+                    Some(ev) = term_events.next() => {
+                        if let Ok(CtEvent::Key(k)) = ev {
+                            if k.kind == KeyEventKind::Press && is_quit_key(&k) {
+                                info!("quit requested during reconnect backoff");
+                                return Ok(false);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -880,7 +943,7 @@ impl App {
                     }
                     // Drain anything the user typed while we were down.
                     self.flush_pending_sends().await;
-                    return Ok(());
+                    return Ok(true);
                 }
                 Err(e) => {
                     warn!(attempt, error = %e, "reconnect failed");
@@ -923,8 +986,12 @@ impl App {
                 // expands it.
             }
             Err(e) => {
+                // Give the text back — a slash-command typo must not eat
+                // what the user typed (they may have a long message behind
+                // an accidental leading `/verb`).
                 if let Some(state) = self.state.as_mut() {
                     state.record_error(e.to_string());
+                    state.prompt.insert_str(&text);
                 }
                 return;
             }
@@ -939,6 +1006,9 @@ impl App {
         else {
             if let Some(state) = self.state.as_mut() {
                 state.record_error("no session — try /new <name> [workdir]");
+                // Same courtesy: keep the draft so it survives creating
+                // the session it was meant for.
+                state.prompt.insert_str(&text);
             }
             return;
         };
@@ -1033,7 +1103,10 @@ impl App {
             SlashCommand::Provider(provider_id) => self.set_provider(provider_id).await,
             SlashCommand::Fork { provider_id } => self.fork_focused(provider_id).await,
             SlashCommand::Rename { name } => self.rename_focused(name).await,
-            SlashCommand::Destroy => self.destroy_focused().await,
+            // Destroy is irreversible (scrollback + backing agent state) —
+            // gate it behind the confirmation modal; `y` there fires
+            // `Action::ConfirmDestroy`.
+            SlashCommand::Destroy => self.open_destroy_confirmation(),
             SlashCommand::Interrupt => self.interrupt().await,
             SlashCommand::Approve => self.approve(true).await,
             SlashCommand::Deny => self.approve(false).await,
@@ -1316,21 +1389,40 @@ impl App {
         }
     }
 
-    async fn destroy_focused(&mut self) {
-        let Some(session_id) = self
-            .state
-            .as_ref()
-            .and_then(|s| s.sessions.focused_id().map(ToString::to_string))
-        else {
+    /// `/destroy` step 1 — open the confirmation modal for the focused
+    /// session. The actual destroy only happens from [`Action::ConfirmDestroy`]
+    /// (the `y` key inside the modal).
+    fn open_destroy_confirmation(&mut self) {
+        let Some(state) = self.state.as_mut() else {
             return;
         };
+        let Some(focused) = state.sessions.focused() else {
+            state.record_error("no session focused — /destroy needs one");
+            return;
+        };
+        state.modal = Some(Modal::ConfirmDestroy {
+            session_id: focused.id.clone(),
+            name: focused.name.clone(),
+        });
+    }
+
+    /// `/destroy` step 2 — the user confirmed. Fires the destroy and
+    /// surfaces a daemon rejection (scope, unknown id) instead of silently
+    /// pretending it worked.
+    async fn destroy_session(&mut self, session_id: String) {
         let Some(handle) = self.handle.clone() else {
             return;
         };
         let id = ClientHandle::next_request_id();
-        let _ = handle
-            .send(ClientMessage::SessionDestroy { id, session_id })
-            .await;
+        if let Err(e) = handle
+            .request_ok(ClientMessage::SessionDestroy { id, session_id })
+            .await
+        {
+            if let Some(state) = self.state.as_mut() {
+                state.record_error(format!("/destroy failed: {e}"));
+            }
+            return;
+        }
         let list_id = ClientHandle::next_request_id();
         let _ = handle
             .send(ClientMessage::SessionList { id: list_id })
@@ -1806,6 +1898,28 @@ fn session_create_message(
     }
 }
 
+/// `m` cycle order: interactive → guarded → autonomous → interactive.
+/// Unknown/missing mode starts the cycle at interactive (the most
+/// conservative), never jumping straight to autonomous.
+fn next_mode(current: Option<SessionMode>) -> SessionMode {
+    match current {
+        Some(SessionMode::Interactive) => SessionMode::Guarded,
+        Some(SessionMode::Guarded) => SessionMode::Autonomous,
+        Some(SessionMode::Autonomous) | None => SessionMode::Interactive,
+    }
+}
+
+/// The keys honored while the reconnect backoff owns the terminal: `q` and
+/// Ctrl+C quit; everything else is discarded (context-free — the prompt and
+/// modals are unreachable while disconnected).
+fn is_quit_key(k: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode::Char, KeyModifiers};
+    matches!(
+        (k.code, k.modifiers),
+        (Char('q'), KeyModifiers::NONE) | (Char('c'), KeyModifiers::CONTROL)
+    )
+}
+
 /// Pure `session.set_provider` frame builder (see `session_create_message`).
 fn set_provider_message(id: String, session_id: String, provider_id: String) -> ClientMessage {
     ClientMessage::SessionSetProvider {
@@ -2119,7 +2233,8 @@ mod tests {
             .is_some_and(|e| e.contains("offline — message queued")));
         assert_eq!(app.pending_sends.len(), 1, "queued for reconnect flush");
 
-        // Unknown verb: still a visible parse error.
+        // Unknown verb: still a visible parse error — and the typed text
+        // survives in the prompt instead of being eaten.
         app.state.as_mut().unwrap().prompt.insert_str("/nonsense");
         app.submit_prompt().await;
         assert!(app
@@ -2129,6 +2244,221 @@ mod tests {
             .last_error
             .as_deref()
             .is_some_and(|e| e.contains("nonsense")));
+        let restored = app.state.as_ref().unwrap().prompt.lines().join("\n");
+        assert_eq!(restored, "/nonsense", "typo'd command text must be kept");
+    }
+
+    #[tokio::test]
+    async fn no_session_send_keeps_the_draft() {
+        // Sending with no session focused surfaces the error AND leaves the
+        // draft in the prompt, so it survives creating the session it was
+        // meant for.
+        let mut app = App::new("ws://test".into(), "tok".into());
+        app.state = Some(AppState::new(AuthOkMsg {
+            identity: MessageIdentity {
+                sub: "u".into(),
+                name: None,
+                kind: IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+            capabilities: None,
+            providers: None,
+        }));
+        let draft = "long carefully-worded question\nwith a second line";
+        app.state.as_mut().unwrap().prompt.insert_str(draft);
+        app.submit_prompt().await;
+        assert!(app
+            .state
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("no session")));
+        let restored = app.state.as_ref().unwrap().prompt.lines().join("\n");
+        assert_eq!(restored, draft);
+    }
+
+    #[tokio::test]
+    async fn destroy_opens_confirmation_and_y_confirms() {
+        let mut app = mk_app();
+        // Step 1: /destroy opens the modal — nothing is sent yet.
+        app.state.as_mut().unwrap().prompt.insert_str("/destroy");
+        app.submit_prompt().await;
+        match app.state.as_ref().unwrap().modal.as_ref() {
+            Some(Modal::ConfirmDestroy { session_id, name }) => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(name, "demo");
+            }
+            other => panic!("expected ConfirmDestroy modal, got {other:?}"),
+        }
+
+        // Step 2: `y` consumes the modal and fires the destroy path (no
+        // live handle here — the important invariant is the modal closes
+        // and the app doesn't wedge).
+        app.apply_action(Action::ConfirmDestroy).await;
+        assert!(app.state.as_ref().unwrap().modal.is_none());
+
+        // Dismiss path: reopen, then `n` (DismissModal) cancels without
+        // destroying.
+        app.state.as_mut().unwrap().prompt.insert_str("/destroy");
+        app.submit_prompt().await;
+        assert!(app.state.as_ref().unwrap().modal.is_some());
+        app.apply_action(Action::DismissModal).await;
+        assert!(app.state.as_ref().unwrap().modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn cycle_mode_action_dispatches_from_the_reducer() {
+        // Covers the Action::CycleMode arm (set_mode early-returns without
+        // a live handle; the arm and next_mode still execute).
+        let mut app = mk_app();
+        app.apply_action(Action::CycleMode).await;
+        // No error, no modal — a pure no-op without a connection.
+        assert!(app.state.as_ref().unwrap().modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn destroy_without_a_session_reports_instead_of_opening_the_modal() {
+        let mut app = App::new("ws://test".into(), "tok".into());
+        app.state = Some(AppState::new(AuthOkMsg {
+            identity: MessageIdentity {
+                sub: "u".into(),
+                name: None,
+                kind: IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+            capabilities: None,
+            providers: None,
+        }));
+        app.state.as_mut().unwrap().prompt.insert_str("/destroy");
+        app.submit_prompt().await;
+        assert!(app.state.as_ref().unwrap().modal.is_none());
+        assert!(app
+            .state
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("no session focused")));
+    }
+
+    #[test]
+    fn next_mode_cycles_conservatively() {
+        assert_eq!(
+            next_mode(Some(SessionMode::Interactive)),
+            SessionMode::Guarded
+        );
+        assert_eq!(
+            next_mode(Some(SessionMode::Guarded)),
+            SessionMode::Autonomous
+        );
+        assert_eq!(
+            next_mode(Some(SessionMode::Autonomous)),
+            SessionMode::Interactive
+        );
+        // Unknown mode must not jump to autonomous.
+        assert_eq!(next_mode(None), SessionMode::Interactive);
+    }
+
+    #[tokio::test]
+    async fn destroy_rejection_is_surfaced_not_swallowed() {
+        // A live handle whose daemon never answers: cancelling the pending
+        // request (= socket death) must surface as "/destroy failed: …" in
+        // the footer instead of silently pretending the destroy worked.
+        let (handle, registry) = ClientHandle::detached_for_tests();
+        let mut app = mk_app();
+        app.handle = Some(handle);
+
+        let destroy = app.destroy_session("s1".to_string());
+        let cancel = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            registry.cancel_all();
+        };
+        tokio::join!(destroy, cancel);
+
+        assert!(app
+            .state
+            .as_ref()
+            .unwrap()
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("/destroy failed")));
+    }
+
+    #[tokio::test]
+    async fn reconnect_backoff_exhausts_its_budget_against_a_dead_daemon() {
+        // Nothing listens on this port — every connect attempt is refused
+        // instantly, so with a 1ms backoff unit the WHOLE 5-attempt budget
+        // (incl. the countdown redraws on a TestBackend) runs in
+        // milliseconds and ends in the terminal error.
+        let mut app = App::new("ws://127.0.0.1:9".into(), "tok".into());
+        app.state = Some(mk_state());
+        app.reconnect_backoff_unit = Duration::from_millis(1);
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut term_events = futures_util::stream::pending::<std::io::Result<CtEvent>>();
+
+        let outcome = app
+            .reconnect_with_backoff(&mut terminal, &mut term_events)
+            .await;
+        assert!(outcome.is_err(), "budget exhausted must surface as Err");
+        let err = outcome.unwrap_err().to_string();
+        assert!(err.contains("could not reconnect"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn reconnect_backoff_quits_on_q_and_discards_other_keys() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = App::new("ws://127.0.0.1:9".into(), "tok".into());
+        app.state = Some(mk_state());
+        // Generous unit so attempt 1's wait window is definitely open when
+        // the queued keys are polled.
+        app.reconnect_backoff_unit = Duration::from_millis(250);
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        // A stray letter first (must be DISCARDED, not typed into anything),
+        // then `q` — the loop must return Ok(false) = user quit.
+        let keys: Vec<std::io::Result<CtEvent>> = vec![
+            Ok(CtEvent::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(CtEvent::Key(KeyEvent::new(
+                KeyCode::Char('q'),
+                KeyModifiers::NONE,
+            ))),
+        ];
+        let mut term_events =
+            futures_util::stream::iter(keys).chain(futures_util::stream::pending());
+
+        let outcome = app
+            .reconnect_with_backoff(&mut terminal, &mut term_events)
+            .await
+            .unwrap();
+        assert!(!outcome, "q during backoff must report a clean quit");
+    }
+
+    #[test]
+    fn quit_keys_during_reconnect() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        assert!(is_quit_key(&KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE
+        )));
+        assert!(is_quit_key(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        // Plain typing must NOT quit — it's discarded, not interpreted.
+        assert!(!is_quit_key(&KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_quit_key(&KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE
+        )));
     }
 
     #[test]
