@@ -38,7 +38,13 @@ pub enum ClientMessage {
     /// Request the backend's selectable model catalog. Daemon answers with
     /// [`DaemonMessage::ModelsListResult`](crate::daemon::DaemonMessage::ModelsListResult).
     #[serde(rename = "models.list", rename_all = "camelCase")]
-    ModelsList { id: String },
+    ModelsList {
+        id: String,
+        /// Which backend's catalog to fetch. Absent = the daemon's default
+        /// backend (older clients). Additive on the wire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+    },
 
     #[serde(rename = "session.attach", rename_all = "camelCase")]
     SessionAttach { id: String, session_id: String },
@@ -247,7 +253,7 @@ impl ClientMessage {
         match self {
             Self::SessionCreate { id, .. }
             | Self::SessionList { id }
-            | Self::ModelsList { id }
+            | Self::ModelsList { id, .. }
             | Self::SessionAttach { id, .. }
             | Self::SessionDetach { id, .. }
             | Self::SessionSend { id, .. }

@@ -33,6 +33,9 @@ pub struct AppState {
     /// until the result lands; used to validate `/model` and to map a
     /// model value to its human display name.
     pub models: Vec<ModelInfo>,
+    /// Which backend `models` reflects — so a `/provider` switch refetches
+    /// and a stale result (fast switch) can be dropped. None = unfetched.
+    pub models_provider: Option<String>,
     /// True when `models` came from the live backend (vs a built-in fallback).
     pub models_live: bool,
     pub sessions: SessionList,
@@ -161,6 +164,7 @@ impl AppState {
         Self {
             auth,
             models: Vec::new(),
+            models_provider: None,
             models_live: false,
             sessions: SessionList::default(),
             messages: MessageStore::default(),

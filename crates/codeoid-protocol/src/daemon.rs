@@ -56,6 +56,10 @@ pub enum DaemonMessage {
         models: Vec<ModelInfo>,
         /// True when these came from the live backend; false = built-in fallback.
         live: bool,
+        /// Which backend this catalog is for — lets the client drop a stale
+        /// result after a fast backend switch. Absent on older daemons.
+        #[serde(default)]
+        provider: Option<String>,
     },
 
     #[serde(rename = "session.message")]
