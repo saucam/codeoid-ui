@@ -421,6 +421,18 @@ fn daemon_messages_are_camel_case_on_wire() {
             DaemonMessage::ScrollbackReplay {
                 session_id: "s".into(),
                 messages: vec![sample_session_message()],
+                tail: Some(true),
+                has_more: Some(false),
+            },
+        ),
+        (
+            "ScrollbackPageResult",
+            DaemonMessage::ScrollbackPageResult {
+                request_id: "r".into(),
+                session_id: "s".into(),
+                messages: vec![sample_session_message()],
+                has_more: true,
+                source: "buffer".into(),
             },
         ),
         (

@@ -34,6 +34,9 @@ const TICK: Duration = Duration::from_millis(100);
 /// Reconnect budget. Beyond this we give up and surface a terminal error.
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
+/// 10 Hz ticks before an unanswered `scrollback.page` is declared lost.
+const PAGING_TIMEOUT_TICKS: u64 = 100; // ~10s
+
 /// Cap on how many already-queued daemon events one loop iteration absorbs
 /// before redrawing. High enough to swallow any realistic delta burst in a
 /// single draw, low enough that terminal input can't be starved.
@@ -350,7 +353,17 @@ impl App {
             AppEvent::Net(_) => {
                 // Closed/Errored already handled in event_loop.
             }
-            AppEvent::Tick => state.tick(),
+            AppEvent::Tick => {
+                state.tick();
+                // A page fetch that never answered (daemon hiccup, dropped
+                // frame) must not wedge the "loading older…" state forever.
+                if let Some((sid, started)) = state.paging_in_flight.clone() {
+                    if state.anim_tick.wrapping_sub(started) > PAGING_TIMEOUT_TICKS {
+                        state.paging_in_flight = None;
+                        state.record_error(format!("loading older history for {sid} timed out"));
+                    }
+                }
+            }
         }
     }
 
@@ -404,11 +417,20 @@ impl App {
                     self.destroy_session(session_id).await;
                 }
             }
-            Action::ScrollUp => state.scroll_up(1),
+            Action::ScrollUp => {
+                state.scroll_up(1);
+                self.maybe_fetch_older();
+            }
             Action::ScrollDown => state.scroll_down(1),
-            Action::PageUp => state.scroll_up(page_step(state)),
+            Action::PageUp => {
+                state.scroll_up(page_step(state));
+                self.maybe_fetch_older();
+            }
             Action::PageDown => state.scroll_down(page_step(state)),
-            Action::ScrollToTop => state.scroll_to_top(),
+            Action::ScrollToTop => {
+                state.scroll_to_top();
+                self.maybe_fetch_older();
+            }
             Action::ScrollToBottom => state.scroll_to_bottom(),
             Action::ToggleVerboseToolOutput => {
                 state.verbose_tool_output = !state.verbose_tool_output;
@@ -751,7 +773,50 @@ impl App {
             DaemonMessage::ScrollbackReplay {
                 session_id,
                 messages,
-            } => state.messages.replace_scrollback(session_id, messages),
+                tail,
+                has_more,
+            } => {
+                // Tail-first attach (`scrollback.paging`): the daemon sent
+                // only the newest window; older history is fetched when the
+                // user scrolls past the top.
+                if tail == Some(true) && has_more == Some(true) {
+                    state.has_older_history.insert(session_id.clone());
+                } else {
+                    state.has_older_history.remove(&session_id);
+                }
+                state.messages.replace_scrollback(session_id, messages);
+            }
+            DaemonMessage::ScrollbackPageResult {
+                session_id,
+                messages,
+                has_more,
+                ..
+            } => {
+                // Only clear the in-flight slot if THIS result owns it. A
+                // stale result (its fetch already timed out) for a session
+                // the user has since navigated away from must not clear a
+                // newer session's live fetch — the slot is a single global
+                // lock. The prepend + has_older update below still apply;
+                // they're real history for `session_id`.
+                if state
+                    .paging_in_flight
+                    .as_ref()
+                    .is_some_and(|(sid, _)| sid == &session_id)
+                {
+                    state.paging_in_flight = None;
+                }
+                if has_more {
+                    state.has_older_history.insert(session_id.clone());
+                } else {
+                    state.has_older_history.remove(&session_id);
+                }
+                if !messages.is_empty() {
+                    // Keep the viewport pinned across the top-prepend: the
+                    // bottom-anchored offset must NOT get the growth bump.
+                    state.suppress_growth_anchor_once = true;
+                    state.messages.prepend_messages(&session_id, messages);
+                }
+            }
             DaemonMessage::ResponseError { error, code, .. } => {
                 state.record_error(format!("daemon error [{code:?}]: {error}"));
             }
@@ -1430,6 +1495,35 @@ impl App {
         }
     }
 
+    /// Scroll-past-the-top history backfill (`scrollback.paging`). Fire and
+    /// forget: the daemon's `scrollback.page.result` arrives as an event
+    /// (no registry waiter), so the event loop never blocks on the fetch;
+    /// a `response.error` with no waiter surfaces through the normal error
+    /// path, and the tick handler times out a lost fetch.
+    fn maybe_fetch_older(&mut self) {
+        let Some(state) = self.state.as_ref() else {
+            return;
+        };
+        let Some((session_id, before_message_id)) = older_history_fetch(state) else {
+            return;
+        };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
+        if let Some(st) = self.state.as_mut() {
+            st.paging_in_flight = Some((session_id.clone(), st.anim_tick));
+        }
+        let msg = ClientMessage::ScrollbackPage {
+            id: ClientHandle::next_request_id(),
+            session_id,
+            before_message_id,
+            max_bytes: None,
+        };
+        tokio::spawn(async move {
+            let _ = handle.send(msg).await;
+        });
+    }
+
     /// `/destroy` step 1 — open the confirmation modal for the focused
     /// session. The actual destroy only happens from [`Action::ConfirmDestroy`]
     /// (the `y` key inside the modal).
@@ -1948,6 +2042,28 @@ fn next_mode(current: Option<SessionMode>) -> SessionMode {
         Some(SessionMode::Guarded) => SessionMode::Autonomous,
         Some(SessionMode::Autonomous) | None => SessionMode::Interactive,
     }
+}
+
+/// Pure trigger decision for older-history paging: the focused session has
+/// more history, no fetch is in flight, and the viewport sits at (or was
+/// just sent to) the top of what's loaded. Returns the `(session, anchor)`
+/// for the `scrollback.page` frame.
+fn older_history_fetch(state: &AppState) -> Option<(String, String)> {
+    let sid = state.sessions.focused_id()?;
+    if !state.has_older_history.contains(sid) || state.paging_in_flight.is_some() {
+        return None;
+    }
+    if state.last_total_rendered == 0 {
+        return None; // nothing rendered yet — replay still landing
+    }
+    let max_y = state
+        .last_total_rendered
+        .saturating_sub(usize::from(state.last_viewport_rows));
+    if state.scroll_offset < max_y {
+        return None; // not at the top of loaded history yet
+    }
+    let anchor = state.messages.oldest_message_id(sid)?;
+    Some((sid.to_string(), anchor.to_string()))
 }
 
 /// The keys honored while the reconnect backoff owns the terminal: `q` and
@@ -2529,6 +2645,192 @@ mod tests {
             5,
             "every queued broadcast applied before the drain hit Closed"
         );
+    }
+
+    #[test]
+    fn older_history_trigger_decision() {
+        let mut state = mk_state();
+        // Baseline: at top of a 100-row transcript in a 24-row viewport.
+        state
+            .messages
+            .apply_message(codeoid_protocol::SessionMessage {
+                session_id: "s1".into(),
+                message_id: "m-old".into(),
+                role: codeoid_protocol::MessageRole::Assistant,
+                content: "hi".into(),
+                parts: None,
+                identity: MessageIdentity {
+                    sub: "a".into(),
+                    name: None,
+                    kind: IdentityType::Agent,
+                },
+                tool: None,
+                metadata: None,
+                timestamp: "t".into(),
+            });
+        state.last_total_rendered = 100;
+        state.last_viewport_rows = 24;
+        state.scroll_offset = 76; // == max_y → at top
+
+        // No has_older flag → no fetch.
+        assert_eq!(older_history_fetch(&state), None);
+
+        state.has_older_history.insert("s1".into());
+        assert_eq!(
+            older_history_fetch(&state),
+            Some(("s1".to_string(), "m-old".to_string())),
+            "at top + has_older + idle → fetch with the oldest anchor"
+        );
+
+        // Not at the top → no fetch.
+        state.scroll_offset = 10;
+        assert_eq!(older_history_fetch(&state), None);
+        state.scroll_offset = usize::MAX; // scroll_to_top pre-clamp shape
+        assert!(older_history_fetch(&state).is_some());
+
+        // Fetch already in flight → no double-fire.
+        state.paging_in_flight = Some(("s1".into(), 0));
+        assert_eq!(older_history_fetch(&state), None);
+        state.paging_in_flight = None;
+
+        // Nothing rendered yet (replay still landing) → wait.
+        state.last_total_rendered = 0;
+        assert_eq!(older_history_fetch(&state), None);
+    }
+
+    #[tokio::test]
+    async fn tail_replay_and_page_results_maintain_paging_state() {
+        use codeoid_protocol::{MessageRole, SessionMessage};
+
+        let mk = |id: &str| SessionMessage {
+            session_id: "s1".into(),
+            message_id: id.into(),
+            role: MessageRole::Assistant,
+            content: format!("body {id}"),
+            parts: None,
+            identity: MessageIdentity {
+                sub: "a".into(),
+                name: None,
+                kind: IdentityType::Agent,
+            },
+            tool: None,
+            metadata: None,
+            timestamp: "t".into(),
+        };
+
+        let mut app = mk_app();
+        // Tail replay with more behind it.
+        app.apply_daemon(DaemonMessage::ScrollbackReplay {
+            session_id: "s1".into(),
+            messages: vec![mk("m5"), mk("m6")],
+            tail: Some(true),
+            has_more: Some(true),
+        });
+        {
+            let state = app.state.as_ref().unwrap();
+            assert!(state.has_older_history.contains("s1"));
+            assert_eq!(state.messages.oldest_message_id("s1"), Some("m5"));
+        }
+
+        // Page lands: prepended, anchor moves, still more.
+        app.state.as_mut().unwrap().paging_in_flight = Some(("s1".into(), 0));
+        app.apply_daemon(DaemonMessage::ScrollbackPageResult {
+            request_id: "r".into(),
+            session_id: "s1".into(),
+            messages: vec![mk("m3"), mk("m4")],
+            has_more: true,
+            source: "buffer".into(),
+        });
+        {
+            let state = app.state.as_ref().unwrap();
+            assert!(state.paging_in_flight.is_none(), "fetch settled");
+            assert!(
+                state.suppress_growth_anchor_once,
+                "prepend pins the viewport"
+            );
+            assert!(state.has_older_history.contains("s1"));
+            let ids: Vec<&str> = state
+                .messages
+                .messages("s1")
+                .iter()
+                .map(|m| m.message_id.as_str())
+                .collect();
+            assert_eq!(ids, ["m3", "m4", "m5", "m6"]);
+        }
+
+        // Final page: history exhausted → affordance clears.
+        app.apply_daemon(DaemonMessage::ScrollbackPageResult {
+            request_id: "r2".into(),
+            session_id: "s1".into(),
+            messages: vec![mk("m1"), mk("m2")],
+            has_more: false,
+            source: "transcript".into(),
+        });
+        let state = app.state.as_ref().unwrap();
+        assert!(!state.has_older_history.contains("s1"));
+        assert_eq!(state.messages.oldest_message_id("s1"), Some("m1"));
+    }
+
+    #[tokio::test]
+    async fn stale_page_fetch_times_out_on_ticks() {
+        let mut app = mk_app();
+        app.state.as_mut().unwrap().paging_in_flight = Some(("s1".into(), 0));
+        // Advance past the timeout window.
+        for _ in 0..=PAGING_TIMEOUT_TICKS {
+            app.update(AppEvent::Tick).await;
+        }
+        let state = app.state.as_ref().unwrap();
+        assert!(state.paging_in_flight.is_none(), "lost fetch cleared");
+        assert!(state
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("timed out")));
+    }
+
+    #[tokio::test]
+    async fn a_stale_page_result_does_not_clear_another_sessions_live_fetch() {
+        use codeoid_protocol::{MessageRole, SessionMessage};
+        // Session A's fetch timed out; the user switched to B and started a
+        // new fetch (the lock now holds B). A's late result must NOT free
+        // the lock — that would let a duplicate B fetch fire — but its
+        // messages still prepend into A's own store.
+        let mk = |sid: &str, id: &str| SessionMessage {
+            session_id: sid.into(),
+            message_id: id.into(),
+            role: MessageRole::Assistant,
+            content: "x".into(),
+            parts: None,
+            identity: MessageIdentity {
+                sub: "a".into(),
+                name: None,
+                kind: IdentityType::Agent,
+            },
+            tool: None,
+            metadata: None,
+            timestamp: "t".into(),
+        };
+        let mut app = mk_app();
+        app.state
+            .as_mut()
+            .unwrap()
+            .messages
+            .apply_message(mk("A", "a2"));
+        // B owns the in-flight lock.
+        app.state.as_mut().unwrap().paging_in_flight = Some(("B".into(), 5));
+
+        app.apply_daemon(DaemonMessage::ScrollbackPageResult {
+            request_id: "late".into(),
+            session_id: "A".into(),
+            messages: vec![mk("A", "a1")],
+            has_more: false,
+            source: "buffer".into(),
+        });
+
+        let state = app.state.as_ref().unwrap();
+        // B's lock survived the stale A result.
+        assert_eq!(state.paging_in_flight, Some(("B".into(), 5)));
+        // A's real older history still prepended.
+        assert_eq!(state.messages.oldest_message_id("A"), Some("a1"));
     }
 
     #[test]

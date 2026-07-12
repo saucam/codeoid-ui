@@ -183,6 +183,47 @@ impl MessageStore {
         self.by_session.insert(session_id, messages);
     }
 
+    /// Prepend a page of OLDER history (`scrollback.page.result`) ahead of
+    /// what's already buffered. Order is preserved (page arrives
+    /// oldest→newest); ids already present are dropped (overlapping pages
+    /// are harmless), and every prepended message gets a version bump so
+    /// render caches treat it as fresh. One epoch bump re-renders once.
+    pub fn prepend_messages(&mut self, session_id: &str, page: Vec<SessionMessage>) {
+        if page.is_empty() {
+            return;
+        }
+        let buf = self.by_session.entry(session_id.to_string()).or_default();
+        let existing: std::collections::HashSet<&str> =
+            buf.iter().map(|m| m.message_id.as_str()).collect();
+        let mut fresh: Vec<SessionMessage> = Vec::with_capacity(page.len());
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for m in page {
+            if existing.contains(m.message_id.as_str()) || !seen.insert(m.message_id.clone()) {
+                continue;
+            }
+            fresh.push(m);
+        }
+        if fresh.is_empty() {
+            return;
+        }
+        let ids: Vec<String> = fresh.iter().map(|m| m.message_id.clone()).collect();
+        buf.splice(0..0, fresh);
+        for id in &ids {
+            self.bump(id);
+        }
+        self.bump_session(session_id);
+    }
+
+    /// The oldest buffered message id for a session — the `scrollback.page`
+    /// anchor. None when nothing is buffered yet.
+    #[must_use]
+    pub fn oldest_message_id(&self, session_id: &str) -> Option<&str> {
+        self.by_session
+            .get(session_id)
+            .and_then(|buf| buf.first())
+            .map(|m| m.message_id.as_str())
+    }
+
     /// Drop every per-session and per-message entry for sessions not in
     /// `live`. Without this, a long-lived TUI keeps the full transcript
     /// (plus one `versions` entry per message id ever seen) of every
@@ -527,6 +568,60 @@ mod tests {
             markdown: None,
         }]);
         assert_eq!(MessageStore::preview(&m), "plain");
+    }
+
+    #[test]
+    fn prepend_messages_front_inserts_dedupes_and_bumps_once() {
+        let mut store = MessageStore::default();
+        store.apply_message(mk_msg("s1", "m4"));
+        store.apply_message(mk_msg("s1", "m5"));
+        let epoch_before = store.epoch_of_session("s1");
+
+        // Page arrives oldest→newest; m4 overlaps what we already hold.
+        store.prepend_messages(
+            "s1",
+            vec![mk_msg("s1", "m2"), mk_msg("s1", "m3"), mk_msg("s1", "m4")],
+        );
+
+        let ids: Vec<&str> = store
+            .messages("s1")
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["m2", "m3", "m4", "m5"],
+            "front-inserted, overlap deduped"
+        );
+        assert_eq!(
+            store.epoch_of_session("s1"),
+            epoch_before + 1,
+            "one epoch bump"
+        );
+        assert!(
+            store.version_of("m2") > 0,
+            "prepended messages get versions"
+        );
+        assert_eq!(store.oldest_message_id("s1"), Some("m2"));
+
+        // In-batch duplicates collapse; an all-duplicate page is a no-op.
+        store.prepend_messages("s1", vec![mk_msg("s1", "m1"), mk_msg("s1", "m1")]);
+        assert_eq!(store.oldest_message_id("s1"), Some("m1"));
+        let epoch = store.epoch_of_session("s1");
+        store.prepend_messages("s1", vec![mk_msg("s1", "m1")]);
+        assert_eq!(
+            store.epoch_of_session("s1"),
+            epoch,
+            "no-op page bumps nothing"
+        );
+        store.prepend_messages("s1", vec![]);
+        assert_eq!(store.epoch_of_session("s1"), epoch);
+    }
+
+    #[test]
+    fn oldest_message_id_none_for_unknown_session() {
+        let store = MessageStore::default();
+        assert_eq!(store.oldest_message_id("nope"), None);
     }
 
     #[test]

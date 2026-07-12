@@ -81,6 +81,26 @@ pub enum DaemonMessage {
     ScrollbackReplay {
         session_id: String,
         messages: Vec<SessionMessage>,
+        /// `scrollback.paging`: this snapshot is only the NEWEST window;
+        /// older history is fetched on demand via `scrollback.page`.
+        #[serde(default)]
+        tail: Option<bool>,
+        /// With `tail: true` — whether history older than the window exists.
+        #[serde(default)]
+        has_more: Option<bool>,
+    },
+
+    /// Answer to `scrollback.page` — history strictly OLDER than the anchor,
+    /// oldest→newest; the client PREPENDS (dedup by message id).
+    #[serde(rename = "scrollback.page.result", rename_all = "camelCase")]
+    ScrollbackPageResult {
+        request_id: String,
+        session_id: String,
+        messages: Vec<SessionMessage>,
+        has_more: bool,
+        /// "buffer" | "transcript" — diagnostics only; kept as a string so
+        /// new sources stay wire-additive.
+        source: String,
     },
 
     #[serde(rename = "session.search.result", rename_all = "camelCase")]

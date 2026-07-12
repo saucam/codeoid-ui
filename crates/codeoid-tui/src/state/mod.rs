@@ -88,6 +88,17 @@ pub struct AppState {
     /// "leaks" a Thinking spinner onto an idle session B when the user
     /// switches tabs.
     pub activity_by_session: HashMap<String, u64>,
+    /// Sessions with history older than what's buffered (tail-first attach
+    /// `hasMore`, then per page-result). Scrolling past the top fetches it.
+    pub has_older_history: HashSet<String>,
+    /// Session with a `scrollback.page` fetch in flight (anim_tick when it
+    /// started, for a stale-fetch timeout) — one at a time is plenty.
+    pub paging_in_flight: Option<(String, u64)>,
+    /// One-shot: the next `note_total_rendered` growth is a top-PREPEND
+    /// (older history), not bottom growth — skip the anchored-offset bump.
+    /// The offset is measured from the BOTTOM, so keeping it unchanged is
+    /// exactly what pins the viewport across a prepend.
+    pub suppress_growth_anchor_once: bool,
     /// Session ids we've already sent `session.attach` for. The daemon
     /// only broadcasts messages (and echoes our own sends) to attached
     /// clients — without this set, `session.send` would succeed on the
@@ -177,6 +188,9 @@ impl AppState {
             last_error: None,
             anim_tick: 0,
             activity_by_session: HashMap::new(),
+            has_older_history: HashSet::new(),
+            paging_in_flight: None,
+            suppress_growth_anchor_once: false,
             attached: HashSet::new(),
             connection: ConnectionState::Connected,
             render_cache: RenderCache::default(),
@@ -359,7 +373,18 @@ impl AppState {
         self.messages.retain_sessions(&live);
         self.activity_by_session.retain(|sid, _| live.contains(sid));
         self.attached.retain(|sid| live.contains(sid));
+        self.has_older_history.retain(|sid| live.contains(sid));
         self.pending_ui_requests.retain(|sid, _| live.contains(sid));
+        // Release the single global paging lock if its session is gone —
+        // otherwise a fetch in flight when a session is destroyed blocks
+        // every OTHER session from paging until the 10s tick timeout.
+        if self
+            .paging_in_flight
+            .as_ref()
+            .is_some_and(|(sid, _)| !live.contains(sid))
+        {
+            self.paging_in_flight = None;
+        }
     }
 
     pub fn merge_session(&mut self, session: SessionInfo) {
@@ -418,9 +443,16 @@ impl AppState {
     /// for the "↓ N new" indicator.
     pub fn note_total_rendered(&mut self, total: usize) {
         if self.scroll_offset > 0 && total > self.last_total_rendered {
-            let delta = total - self.last_total_rendered;
-            self.scroll_offset = self.scroll_offset.saturating_add(delta);
-            self.unseen_below_rows = self.unseen_below_rows.saturating_add(delta);
+            if self.suppress_growth_anchor_once {
+                // Growth came from a top-PREPEND (older-history page). The
+                // bottom-anchored offset already pins the viewport; bumping
+                // it would shift the view up by the prepended rows.
+                self.suppress_growth_anchor_once = false;
+            } else {
+                let delta = total - self.last_total_rendered;
+                self.scroll_offset = self.scroll_offset.saturating_add(delta);
+                self.unseen_below_rows = self.unseen_below_rows.saturating_add(delta);
+            }
         }
         self.last_total_rendered = total;
     }
@@ -733,6 +765,40 @@ mod tests {
     }
 
     #[test]
+    fn prepend_growth_does_not_bump_the_bottom_anchored_offset() {
+        let mut state = AppState::new(AuthOkMsg {
+            identity: MessageIdentity {
+                sub: "u".into(),
+                name: None,
+                kind: IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+            capabilities: None,
+            providers: None,
+        });
+        // Scrolled up, 100 rows rendered.
+        state.note_total_rendered(100);
+        state.scroll_up(10);
+        assert_eq!(state.scroll_offset, 10);
+
+        // Bottom growth (live streaming): anchored offset follows.
+        state.note_total_rendered(120);
+        assert_eq!(state.scroll_offset, 30);
+
+        // Top growth (older-history prepend): offset must stay put — it's
+        // measured from the BOTTOM, which didn't move.
+        state.suppress_growth_anchor_once = true;
+        state.note_total_rendered(200);
+        assert_eq!(state.scroll_offset, 30, "prepend must not shift the view");
+        assert!(!state.suppress_growth_anchor_once, "one-shot consumed");
+
+        // Next bottom growth anchors again.
+        state.note_total_rendered(210);
+        assert_eq!(state.scroll_offset, 40);
+    }
+
+    #[test]
     fn set_sessions_prunes_state_for_dead_sessions() {
         let mut state = AppState::new(AuthOkMsg {
             identity: MessageIdentity {
@@ -755,6 +821,9 @@ mod tests {
             state.mark_activity(sid);
         }
 
+        // A history fetch was in flight for the doomed session.
+        state.paging_in_flight = Some(("dead".into(), 0));
+
         // The daemon's next list only knows "alive" (dead was destroyed
         // in another client).
         state.set_sessions(vec![mk_session_info("alive")]);
@@ -765,9 +834,34 @@ mod tests {
         );
         assert!(!state.attached.contains("dead"));
         assert!(!state.activity_by_session.contains_key("dead"));
+        // The global paging lock held by the destroyed session is released —
+        // otherwise every other session is blocked from paging for 10s.
+        assert!(
+            state.paging_in_flight.is_none(),
+            "dead session's paging lock must be released"
+        );
         // Live session untouched.
         assert_eq!(state.messages.messages("alive").len(), 1);
         assert!(state.attached.contains("alive"));
+    }
+
+    #[test]
+    fn prune_keeps_a_live_sessions_paging_lock() {
+        let mut state = AppState::new(AuthOkMsg {
+            identity: MessageIdentity {
+                sub: "u".into(),
+                name: None,
+                kind: IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+            capabilities: None,
+            providers: None,
+        });
+        state.sessions.upsert(mk_session_info("alive"));
+        state.paging_in_flight = Some(("alive".into(), 7));
+        state.set_sessions(vec![mk_session_info("alive")]);
+        assert_eq!(state.paging_in_flight, Some(("alive".into(), 7)));
     }
 
     fn tool_call_msg(sid: &str, mid: &str) -> codeoid_protocol::SessionMessage {
