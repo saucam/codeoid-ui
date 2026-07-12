@@ -59,7 +59,9 @@ async fn main() -> anyhow::Result<()> {
 
 async fn list_models(handle: &ClientHandle) -> anyhow::Result<()> {
     let id = ClientHandle::next_request_id();
-    let outcome = handle.request(ClientMessage::ModelsList { id }).await?;
+    let outcome = handle
+        .request(ClientMessage::ModelsList { id, provider: None })
+        .await?;
     match outcome {
         codeoid_client::request::RequestOutcome::TypedResult(DaemonMessage::ModelsListResult {
             models,

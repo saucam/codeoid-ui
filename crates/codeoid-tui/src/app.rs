@@ -587,6 +587,9 @@ impl App {
     /// commands and surface its oldest pending dialog if no modal is up.
     async fn on_focus_changed(&mut self) {
         self.maybe_fetch_commands().await;
+        // The model catalog is per-backend; a focus switch may change the
+        // active backend, so refetch for the newly-focused session.
+        self.fetch_models().await;
         if let Some(state) = self.state.as_mut() {
             state.maybe_open_ui_dialog();
         }
@@ -728,9 +731,29 @@ impl App {
                     }
                 }
             }
-            DaemonMessage::ModelsListResult { models, live, .. } => {
-                state.models = models;
-                state.models_live = live;
+            DaemonMessage::ModelsListResult {
+                models,
+                live,
+                provider,
+                ..
+            } => {
+                // Drop a stale catalog: after a fast `/provider` switch an
+                // in-flight result for the OLD backend must not clobber the
+                // new one's list. Older daemons omit `provider` (None) — then
+                // we can't guard, so accept it (legacy behavior).
+                let focused_provider = state
+                    .sessions
+                    .focused()
+                    .and_then(|sess| sess.provider_id.clone());
+                let stale = matches!(
+                    (&provider, &focused_provider),
+                    (Some(p), Some(f)) if p != f
+                );
+                if !stale {
+                    state.models = models;
+                    state.models_live = live;
+                    state.models_provider = provider.or(focused_provider);
+                }
             }
             DaemonMessage::SessionInfoUpdate { session, .. } => {
                 state.merge_session(session);
@@ -966,12 +989,32 @@ impl App {
             if let Err(e) = handle.send(ClientMessage::SessionList { id }).await {
                 warn!(error = %e, "failed to send initial session.list");
             }
-            // Fetch the model catalog so /model can validate + display.
-            // Fire-and-forget: the result routes back through apply_daemon.
-            let mid = ClientHandle::next_request_id();
-            if let Err(e) = handle.send(ClientMessage::ModelsList { id: mid }).await {
-                warn!(error = %e, "failed to send models.list");
-            }
+        }
+        // Fetch the FOCUSED session's backend catalog (not the daemon
+        // default) once the session list has been requested.
+        self.fetch_models().await;
+    }
+
+    /// Fetch the model catalog for the focused session's backend. Called on
+    /// connect, on focus change, and after a `/provider` switch — the catalog
+    /// is per-backend, so it must follow the session's provider (the bug:
+    /// switching to codex kept showing claude's models). Fire-and-forget; the
+    /// result routes back through apply_daemon, guarded against staleness.
+    async fn fetch_models(&mut self) {
+        let provider = self
+            .state
+            .as_ref()
+            .and_then(|s| s.sessions.focused())
+            .and_then(|sess| sess.provider_id.clone());
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
+        let id = ClientHandle::next_request_id();
+        if let Err(e) = handle
+            .send(ClientMessage::ModelsList { id, provider })
+            .await
+        {
+            warn!(error = %e, "failed to send models.list");
         }
     }
 
@@ -1430,7 +1473,26 @@ impl App {
             Ok(_) => {
                 if let Some(state) = self.state.as_mut() {
                     state.last_error = None;
+                    // Optimistically reflect the switch locally BEFORE the
+                    // refetch: the daemon's `session.info_update` carrying the
+                    // new providerId is a separate frame that may not have
+                    // landed yet, and both fetch_models and its staleness
+                    // guard key off the focused session's provider_id. Without
+                    // this, the refetch would ask for the OLD backend (and the
+                    // guard would then reject the new backend's result). The
+                    // switch already succeeded, so the daemon's later
+                    // info_update carries the same value — idempotent.
+                    if let Some(mut sess) = state.sessions.focused().cloned() {
+                        sess.provider_id = Some(provider_id.clone());
+                        state.sessions.upsert(sess);
+                    }
+                    // Clear the old catalog so the picker can't show the
+                    // previous backend's models while the refetch is in flight.
+                    state.models = Vec::new();
+                    state.models_live = false;
+                    state.models_provider = None;
                 }
+                self.fetch_models().await;
             }
             Err(e) => {
                 // Daemon rejections (mid-turn switch, unknown provider)
@@ -2499,6 +2561,120 @@ mod tests {
             .last_error
             .as_deref()
             .is_some_and(|e| e.contains("no session focused")));
+    }
+
+    fn model(v: &str) -> codeoid_protocol::ModelInfo {
+        codeoid_protocol::ModelInfo {
+            value: v.into(),
+            display_name: v.into(),
+            description: None,
+            is_default: None,
+        }
+    }
+
+    fn set_focused_provider(app: &mut App, provider: Option<&str>) {
+        let state = app.state.as_mut().unwrap();
+        let mut s = state.sessions.focused().cloned().unwrap();
+        s.provider_id = provider.map(ToString::to_string);
+        state.sessions.upsert(s);
+    }
+
+    #[test]
+    fn models_result_matching_the_focused_backend_is_applied() {
+        let mut app = mk_app();
+        set_focused_provider(&mut app, Some("codex"));
+        app.apply_daemon(DaemonMessage::ModelsListResult {
+            request_id: "r".into(),
+            models: vec![model("gpt-5-codex")],
+            live: true,
+            provider: Some("codex".into()),
+        });
+        let state = app.state.as_ref().unwrap();
+        assert_eq!(
+            state
+                .models
+                .iter()
+                .map(|m| m.value.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-5-codex"]
+        );
+        assert!(state.models_live);
+        assert_eq!(state.models_provider.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn stale_models_result_for_the_old_backend_is_dropped() {
+        // Focused session is on codex; a late result for claude (the backend
+        // just switched away from) must NOT clobber the catalog.
+        let mut app = mk_app();
+        set_focused_provider(&mut app, Some("codex"));
+        app.apply_daemon(DaemonMessage::ModelsListResult {
+            request_id: "r".into(),
+            models: vec![model("gpt-5-codex")],
+            live: true,
+            provider: Some("codex".into()),
+        });
+        app.apply_daemon(DaemonMessage::ModelsListResult {
+            request_id: "r2".into(),
+            models: vec![model("opus"), model("sonnet")],
+            live: true,
+            provider: Some("claude".into()), // stale — different backend
+        });
+        let state = app.state.as_ref().unwrap();
+        assert_eq!(
+            state
+                .models
+                .iter()
+                .map(|m| m.value.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-5-codex"],
+            "stale claude result must not replace codex's catalog"
+        );
+        assert_eq!(state.models_provider.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn legacy_models_result_without_provider_is_accepted() {
+        // Older daemons omit `provider` — we can't guard, so accept it.
+        let mut app = mk_app();
+        set_focused_provider(&mut app, Some("codex"));
+        app.apply_daemon(DaemonMessage::ModelsListResult {
+            request_id: "r".into(),
+            models: vec![model("legacy")],
+            live: false,
+            provider: None,
+        });
+        let state = app.state.as_ref().unwrap();
+        assert_eq!(
+            state
+                .models
+                .iter()
+                .map(|m| m.value.as_str())
+                .collect::<Vec<_>>(),
+            ["legacy"]
+        );
+        // provider falls back to the focused session's.
+        assert_eq!(state.models_provider.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn models_list_frame_carries_the_provider() {
+        let msg = ClientMessage::ModelsList {
+            id: "r".into(),
+            provider: Some("codex".into()),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "models.list");
+        assert_eq!(json["provider"], "codex");
+        // None → field omitted (legacy-compatible).
+        let bare = ClientMessage::ModelsList {
+            id: "r".into(),
+            provider: None,
+        };
+        assert!(serde_json::to_value(&bare)
+            .unwrap()
+            .get("provider")
+            .is_none());
     }
 
     #[test]
