@@ -47,7 +47,9 @@ pub use daemon::{
 pub use message::{
     ContentPart, IdentityType, MessageIdentity, MessageRole, SessionMessage, SessionMessageDelta,
 };
-pub use session::{SessionInfo, SessionMode, SessionStatus, SessionUsage, Subagent, TurnUsage};
+pub use session::{
+    ForkedFrom, SessionInfo, SessionMode, SessionStatus, SessionUsage, Subagent, TurnUsage,
+};
 pub use tool::{CancelReason, ConfirmedBy, ToolInfo, ToolPhase, ToolState};
 
 /// Wire protocol version this crate speaks.

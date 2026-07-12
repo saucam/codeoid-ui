@@ -83,6 +83,22 @@ pub struct SessionInfo {
     /// Absent on daemons that predate multi-provider sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
+
+    /// Lineage for a session created via `session.fork`. Absent = not a fork.
+    /// Rendered as a "⑃ from <name>·t<atTurn>" tag in the session title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<ForkedFrom>,
+}
+
+/// Where a forked session came from — the parent id, the parent's name at
+/// fork time (a snapshot; the parent may be renamed or gone), and the branch
+/// point (conversation rounds carried over).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkedFrom {
+    pub session_id: String,
+    pub name: String,
+    pub at_turn: u32,
 }
 
 /// Rotation telemetry — how many times the backing Claude Code session has

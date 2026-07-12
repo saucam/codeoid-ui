@@ -108,6 +108,11 @@ fn sample_session_info() -> SessionInfo {
         model: Some("claude-opus-4-7".into()),
         fallback_model: None,
         provider_id: None,
+        forked_from: Some(codeoid_protocol::ForkedFrom {
+            session_id: "parent-1".into(),
+            name: "Sandbox".into(),
+            at_turn: 12,
+        }),
     }
 }
 
