@@ -375,6 +375,16 @@ impl AppState {
         self.attached.retain(|sid| live.contains(sid));
         self.has_older_history.retain(|sid| live.contains(sid));
         self.pending_ui_requests.retain(|sid, _| live.contains(sid));
+        // Release the single global paging lock if its session is gone —
+        // otherwise a fetch in flight when a session is destroyed blocks
+        // every OTHER session from paging until the 10s tick timeout.
+        if self
+            .paging_in_flight
+            .as_ref()
+            .is_some_and(|(sid, _)| !live.contains(sid))
+        {
+            self.paging_in_flight = None;
+        }
     }
 
     pub fn merge_session(&mut self, session: SessionInfo) {
@@ -811,6 +821,9 @@ mod tests {
             state.mark_activity(sid);
         }
 
+        // A history fetch was in flight for the doomed session.
+        state.paging_in_flight = Some(("dead".into(), 0));
+
         // The daemon's next list only knows "alive" (dead was destroyed
         // in another client).
         state.set_sessions(vec![mk_session_info("alive")]);
@@ -821,9 +834,34 @@ mod tests {
         );
         assert!(!state.attached.contains("dead"));
         assert!(!state.activity_by_session.contains_key("dead"));
+        // The global paging lock held by the destroyed session is released —
+        // otherwise every other session is blocked from paging for 10s.
+        assert!(
+            state.paging_in_flight.is_none(),
+            "dead session's paging lock must be released"
+        );
         // Live session untouched.
         assert_eq!(state.messages.messages("alive").len(), 1);
         assert!(state.attached.contains("alive"));
+    }
+
+    #[test]
+    fn prune_keeps_a_live_sessions_paging_lock() {
+        let mut state = AppState::new(AuthOkMsg {
+            identity: MessageIdentity {
+                sub: "u".into(),
+                name: None,
+                kind: IdentityType::Human,
+            },
+            scopes: vec![],
+            protocol_version: Some(1),
+            capabilities: None,
+            providers: None,
+        });
+        state.sessions.upsert(mk_session_info("alive"));
+        state.paging_in_flight = Some(("alive".into(), 7));
+        state.set_sessions(vec![mk_session_info("alive")]);
+        assert_eq!(state.paging_in_flight, Some(("alive".into(), 7)));
     }
 
     fn tool_call_msg(sid: &str, mid: &str) -> codeoid_protocol::SessionMessage {

@@ -792,7 +792,19 @@ impl App {
                 has_more,
                 ..
             } => {
-                state.paging_in_flight = None;
+                // Only clear the in-flight slot if THIS result owns it. A
+                // stale result (its fetch already timed out) for a session
+                // the user has since navigated away from must not clear a
+                // newer session's live fetch — the slot is a single global
+                // lock. The prepend + has_older update below still apply;
+                // they're real history for `session_id`.
+                if state
+                    .paging_in_flight
+                    .as_ref()
+                    .is_some_and(|(sid, _)| sid == &session_id)
+                {
+                    state.paging_in_flight = None;
+                }
                 if has_more {
                     state.has_older_history.insert(session_id.clone());
                 } else {
@@ -2773,6 +2785,52 @@ mod tests {
             .last_error
             .as_deref()
             .is_some_and(|e| e.contains("timed out")));
+    }
+
+    #[tokio::test]
+    async fn a_stale_page_result_does_not_clear_another_sessions_live_fetch() {
+        use codeoid_protocol::{MessageRole, SessionMessage};
+        // Session A's fetch timed out; the user switched to B and started a
+        // new fetch (the lock now holds B). A's late result must NOT free
+        // the lock — that would let a duplicate B fetch fire — but its
+        // messages still prepend into A's own store.
+        let mk = |sid: &str, id: &str| SessionMessage {
+            session_id: sid.into(),
+            message_id: id.into(),
+            role: MessageRole::Assistant,
+            content: "x".into(),
+            parts: None,
+            identity: MessageIdentity {
+                sub: "a".into(),
+                name: None,
+                kind: IdentityType::Agent,
+            },
+            tool: None,
+            metadata: None,
+            timestamp: "t".into(),
+        };
+        let mut app = mk_app();
+        app.state
+            .as_mut()
+            .unwrap()
+            .messages
+            .apply_message(mk("A", "a2"));
+        // B owns the in-flight lock.
+        app.state.as_mut().unwrap().paging_in_flight = Some(("B".into(), 5));
+
+        app.apply_daemon(DaemonMessage::ScrollbackPageResult {
+            request_id: "late".into(),
+            session_id: "A".into(),
+            messages: vec![mk("A", "a1")],
+            has_more: false,
+            source: "buffer".into(),
+        });
+
+        let state = app.state.as_ref().unwrap();
+        // B's lock survived the stale A result.
+        assert_eq!(state.paging_in_flight, Some(("B".into(), 5)));
+        // A's real older history still prepended.
+        assert_eq!(state.messages.oldest_message_id("A"), Some("a1"));
     }
 
     #[test]
