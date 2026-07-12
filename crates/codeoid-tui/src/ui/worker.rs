@@ -371,6 +371,7 @@ mod tests {
             model: None,
             fallback_model: None,
             provider_id: None,
+            forked_from: None,
         });
         state.provider_commands.insert(
             "s1".into(),

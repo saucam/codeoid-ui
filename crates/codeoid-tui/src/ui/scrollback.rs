@@ -341,8 +341,31 @@ fn session_title(session: &SessionInfo) -> Line<'static> {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
+        // Fork lineage — mirrors the web chip. Shows the parent this session
+        // branched from and the branch point (conversation rounds carried
+        // over), so a forked tab is self-describing.
+        Span::styled(
+            match &session.forked_from {
+                Some(f) => format!("  · ⑃ {} ·t{}", truncate_name(&f.name, 20), f.at_turn),
+                None => String::new(),
+            },
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::ITALIC),
+        ),
         Span::raw(" "),
     ])
+}
+
+/// Cap a parent name for the compact fork-lineage tag, adding an ellipsis
+/// when truncated. Operates on chars so multibyte names aren't split.
+fn truncate_name(name: &str, max: usize) -> String {
+    if name.chars().count() <= max {
+        return name.to_string();
+    }
+    let mut out: String = name.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// Render a session message as styled lines. Returns empty when there's
@@ -607,6 +630,7 @@ mod tests {
             model: None,
             fallback_model: None,
             provider_id: None,
+            forked_from: None,
         }
     }
 
@@ -916,5 +940,41 @@ mod tests {
             .map(|sp| sp.content.clone().into_owned())
             .collect();
         assert!(!title.contains("claude"), "{title}");
+    }
+
+    #[test]
+    fn session_title_shows_fork_lineage() {
+        let mut session = mk_session("fork-1");
+        session.forked_from = Some(codeoid_protocol::ForkedFrom {
+            session_id: "parent".into(),
+            name: "Sandbox".into(),
+            at_turn: 12,
+        });
+        let title: String = session_title(&session)
+            .spans
+            .iter()
+            .map(|sp| sp.content.clone().into_owned())
+            .collect();
+        assert!(title.contains("⑃"), "{title}");
+        assert!(title.contains("Sandbox"), "{title}");
+        assert!(title.contains("t12"), "{title}");
+
+        // A non-fork session shows no lineage tag.
+        let plain = mk_session("s2");
+        let title: String = session_title(&plain)
+            .spans
+            .iter()
+            .map(|sp| sp.content.clone().into_owned())
+            .collect();
+        assert!(!title.contains("⑃"), "{title}");
+    }
+
+    #[test]
+    fn truncate_name_caps_long_parent_names() {
+        assert_eq!(truncate_name("short", 20), "short");
+        let long = "a".repeat(30);
+        let out = truncate_name(&long, 20);
+        assert_eq!(out.chars().count(), 20);
+        assert!(out.ends_with('…'));
     }
 }
