@@ -360,11 +360,10 @@ fn session_title(session: &SessionInfo) -> Line<'static> {
 /// Cap a parent name for the compact fork-lineage tag, adding an ellipsis
 /// when truncated. Operates on chars so multibyte names aren't split.
 fn truncate_name(name: &str, max: usize) -> String {
-    let chars: Vec<char> = name.chars().collect();
-    if chars.len() <= max {
+    if name.chars().count() <= max {
         return name.to_string();
     }
-    let mut out: String = chars[..max.saturating_sub(1)].iter().collect();
+    let mut out: String = name.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
 }
