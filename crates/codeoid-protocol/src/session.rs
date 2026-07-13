@@ -88,6 +88,12 @@ pub struct SessionInfo {
     /// Rendered as a "⑃ from <name>·t<atTurn>" tag in the session title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<ForkedFrom>,
+
+    /// Git worktree backing this session's workdir (fork isolation / bind).
+    /// Absent = shares its workdir with no git isolation. Rendered as a
+    /// "⎇ <branch>" tag in the session title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<SessionWorktree>,
 }
 
 /// Where a forked session came from — the parent id, the parent's name at
@@ -99,6 +105,17 @@ pub struct ForkedFrom {
     pub session_id: String,
     pub name: String,
     pub at_turn: u32,
+}
+
+/// A git worktree backing a session's workdir. `created_by_codeoid` marks a
+/// worktree codeoid created for fork isolation (removed on destroy) versus one
+/// the user bound (never touched).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionWorktree {
+    pub path: String,
+    pub branch: String,
+    pub created_by_codeoid: bool,
 }
 
 /// Rotation telemetry — how many times the backing Claude Code session has

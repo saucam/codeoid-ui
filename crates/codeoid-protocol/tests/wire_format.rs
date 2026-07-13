@@ -113,6 +113,11 @@ fn sample_session_info() -> SessionInfo {
             name: "Sandbox".into(),
             at_turn: 12,
         }),
+        worktree: Some(codeoid_protocol::SessionWorktree {
+            path: "/repo-worktrees/fix-a1b2".into(),
+            branch: "codeoid/fix-a1b2".into(),
+            created_by_codeoid: true,
+        }),
     }
 }
 
