@@ -48,7 +48,8 @@ pub use message::{
     ContentPart, IdentityType, MessageIdentity, MessageRole, SessionMessage, SessionMessageDelta,
 };
 pub use session::{
-    ForkedFrom, SessionInfo, SessionMode, SessionStatus, SessionUsage, Subagent, TurnUsage,
+    ForkedFrom, SessionInfo, SessionMode, SessionStatus, SessionUsage, SessionWorktree, Subagent,
+    TurnUsage,
 };
 pub use tool::{CancelReason, ConfirmedBy, ToolInfo, ToolPhase, ToolState};
 

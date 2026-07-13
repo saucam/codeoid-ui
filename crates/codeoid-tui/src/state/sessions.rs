@@ -129,6 +129,7 @@ mod tests {
             fallback_model: None,
             provider_id: None,
             forked_from: None,
+            worktree: None,
         }
     }
 

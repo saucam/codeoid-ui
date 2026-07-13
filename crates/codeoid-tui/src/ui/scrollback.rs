@@ -353,6 +353,17 @@ fn session_title(session: &SessionInfo) -> Line<'static> {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::ITALIC),
         ),
+        // Isolated git worktree — mirrors the web WorktreeChip. Shows the
+        // branch, so a fork running in its own worktree is self-describing.
+        Span::styled(
+            match &session.worktree {
+                Some(w) => format!("  · ⎇ {}", truncate_name(&w.branch, 24)),
+                None => String::new(),
+            },
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::ITALIC),
+        ),
         Span::raw(" "),
     ])
 }
@@ -631,6 +642,7 @@ mod tests {
             fallback_model: None,
             provider_id: None,
             forked_from: None,
+            worktree: None,
         }
     }
 
@@ -967,6 +979,32 @@ mod tests {
             .map(|sp| sp.content.clone().into_owned())
             .collect();
         assert!(!title.contains("⑃"), "{title}");
+    }
+
+    #[test]
+    fn session_title_shows_worktree() {
+        let mut session = mk_session("wt-1");
+        session.worktree = Some(codeoid_protocol::SessionWorktree {
+            path: "/repo-worktrees/fix-a1b2".into(),
+            branch: "codeoid/fix-a1b2".into(),
+            created_by_codeoid: true,
+        });
+        let title: String = session_title(&session)
+            .spans
+            .iter()
+            .map(|sp| sp.content.clone().into_owned())
+            .collect();
+        assert!(title.contains("⎇"), "{title}");
+        assert!(title.contains("codeoid/fix-a1b2"), "{title}");
+
+        // A session without a worktree shows no worktree tag.
+        let plain = mk_session("s2");
+        let title: String = session_title(&plain)
+            .spans
+            .iter()
+            .map(|sp| sp.content.clone().into_owned())
+            .collect();
+        assert!(!title.contains("⎇"), "{title}");
     }
 
     #[test]
