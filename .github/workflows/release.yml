@@ -8,6 +8,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch: # manual build-only run (no upload) to validate every target before a release
 
 permissions:
   contents: write # upload assets to the release
@@ -19,13 +20,18 @@ jobs:
   binaries:
     name: Binary (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20 # fail fast rather than hang to the 24h cap on a stuck/retired runner
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: macos-13, target: x86_64-apple-darwin }
+          # Intel macOS is cross-compiled on the Apple-Silicon macos-latest
+          # runner. The old macos-13 (Intel) runner is being retired by GitHub —
+          # the job sat unscheduled until the 24h cap and was cancelled, so this
+          # binary was missing from every release.
+          - { os: macos-latest, target: x86_64-apple-darwin }
     steps:
       - uses: actions/checkout@v4
 
@@ -51,8 +57,11 @@ jobs:
           echo "ASSET=${DIR}.tar.gz" >> "$GITHUB_ENV"
 
       # release-plz already created the release with changelog notes — just
-      # attach the binary, don't regenerate the body.
+      # attach the binary, don't regenerate the body. Only on a real tag push;
+      # a manual workflow_dispatch run builds + packages every target (a
+      # pre-release smoke test) but skips the upload.
       - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ASSET }}
