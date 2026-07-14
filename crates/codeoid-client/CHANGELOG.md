@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/saucam/codeoid-ui/compare/codeoid-client-v0.1.1...codeoid-client-v0.2.0) - 2026-07-13
+
+### Added
+
+- adopt scrollback.paging — tail-first attach + scroll-up history backfill ([#21](https://github.com/saucam/codeoid-ui/pull/21))
+- surface session fork in the TUI (/fork [backend]) ([#17](https://github.com/saucam/codeoid-ui/pull/17))
+- multi-provider sessions — /provider switch, /new --provider, backend tags ([#15](https://github.com/saucam/codeoid-ui/pull/15))
+- provider extension surface — dialogs, dynamic commands, rich parts rendering ([#14](https://github.com/saucam/codeoid-ui/pull/14))
+
+### Fixed
+
+- model catalog follows the session's backend (TUI) ([#22](https://github.com/saucam/codeoid-ui/pull/22))
+- never wedge or eat input — request timeouts, prompt restore, destroy confirm ([#18](https://github.com/saucam/codeoid-ui/pull/18))
+
 ## [0.1.1](https://github.com/saucam/codeoid-ui/compare/codeoid-client-v0.1.0...codeoid-client-v0.1.1) - 2026-07-02
 
 ### Other
