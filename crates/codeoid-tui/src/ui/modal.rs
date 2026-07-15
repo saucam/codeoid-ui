@@ -9,7 +9,8 @@ use ratatui::Frame;
 use codeoid_protocol::UiRequestMethod;
 
 use crate::state::{
-    AppState, AskUserQuestionModal, CapabilitiesModal, CapabilitiesTab, Modal, UiDialogModal,
+    AppState, AskUserQuestionModal, CapabilitiesModal, CapabilitiesTab, Modal, SettingsModal,
+    UiDialogModal,
 };
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
@@ -20,6 +21,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     // Capabilities and AskUserQuestion deserve more screen real estate
     // for entries / question lists.
     let area = match modal {
+        Modal::Settings(_) => centered(frame.area(), 82, 82),
         Modal::Capabilities(_) | Modal::AskUserQuestion(_) => centered(frame.area(), 80, 75),
         _ => centered(frame.area(), 60, 50),
     };
@@ -32,6 +34,258 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         Modal::Capabilities(c) => render_capabilities(frame, area, c),
         Modal::AskUserQuestion(m) => render_ask_user_question(frame, area, m),
         Modal::UiDialog(m) => render_ui_dialog(frame, area, m),
+        Modal::Settings(m) => render_settings(frame, area, m),
+    }
+}
+
+/// The comprehensive settings screen — tab pills + the active tab's grouped
+/// fields with an inline control per `kind`, staged-edit markers, provenance,
+/// and (when a text field is active) an edit buffer.
+#[allow(clippy::too_many_lines)]
+fn render_settings(frame: &mut Frame<'_>, area: Rect, m: &SettingsModal) {
+    let mut rows: Vec<Line<'static>> = Vec::new();
+
+    if m.loading && m.manifest.is_none() {
+        rows.push(Line::from(Span::styled(
+            "loading…",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    if let Some(err) = &m.error {
+        rows.push(Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    if let Some(manifest) = &m.manifest {
+        // Tab rail.
+        let mut pills: Vec<Span<'static>> = Vec::new();
+        for (i, t) in manifest.tabs.iter().enumerate() {
+            let active = i == m.tab;
+            let label = match &t.icon {
+                Some(icon) => format!(" {icon} {} ", t.title),
+                None => format!(" {} ", t.title),
+            };
+            let style = if active {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            pills.push(Span::styled(label, style));
+            pills.push(Span::raw(" "));
+        }
+        rows.push(Line::from(pills));
+        rows.push(Line::raw(""));
+
+        if let Some(tab) = manifest.tabs.get(m.tab) {
+            if let Some(desc) = &tab.description {
+                rows.push(Line::from(Span::styled(
+                    desc.clone(),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )));
+                rows.push(Line::raw(""));
+            }
+            // Walk groups → visible fields, tracking a running visible index
+            // so the cursor lines up with `m.selected` / `tab_fields()`.
+            let mut idx = 0usize;
+            for group in &tab.groups {
+                let visible: Vec<&codeoid_protocol::SettingField> = group
+                    .fields
+                    .iter()
+                    .filter(|f| m.show_advanced || !f.advanced)
+                    .collect();
+                if visible.is_empty() {
+                    continue;
+                }
+                rows.push(Line::from(Span::styled(
+                    group.title.clone(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                for f in visible {
+                    let selected = idx == m.selected;
+                    rows.push(settings_field_line(m, f, selected));
+                    if selected {
+                        if let Some(editing_key) = &m.editing {
+                            if editing_key == &f.key {
+                                rows.push(settings_edit_line(m));
+                            }
+                        } else if !f.help.is_empty() {
+                            rows.push(Line::from(Span::styled(
+                                format!("      {}", f.help),
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                        }
+                    }
+                    idx += 1;
+                }
+                rows.push(Line::raw(""));
+            }
+        }
+    }
+
+    // Footer: dirty count + status + backing file paths + hints.
+    let dirty = m.dirty.len();
+    let mut footer: Vec<Span<'static>> = Vec::new();
+    if dirty > 0 {
+        footer.push(Span::styled(
+            format!("{dirty} unsaved "),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    if m.restart_required {
+        footer.push(Span::styled(
+            "· restart to apply ",
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    if let Some(status) = &m.status {
+        footer.push(Span::styled(
+            format!("· {status} "),
+            Style::default().fg(Color::Green),
+        ));
+    }
+    if !footer.is_empty() {
+        rows.push(Line::from(footer));
+    }
+    if let Some(snap) = &m.snapshot {
+        rows.push(Line::from(Span::styled(
+            format!("files: {} · {}", snap.config_path, snap.env_path),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    rows.push(hint_line(
+        "↑↓ field · ←→ tab · Enter toggle/edit · s save · a advanced · x clear · r refresh · Esc close",
+    ));
+
+    let block = Block::default()
+        .title(" Settings ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    frame.render_widget(
+        Paragraph::new(rows)
+            .block(block)
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        area,
+    );
+}
+
+/// One field row: cursor + label + its current control state + badges.
+fn settings_field_line(
+    m: &SettingsModal,
+    f: &codeoid_protocol::SettingField,
+    selected: bool,
+) -> Line<'static> {
+    let cursor = if selected { "▶ " } else { "  " };
+    let name_style = if selected {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let mut spans = vec![
+        Span::styled(cursor.to_string(), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("{}: ", f.label), name_style),
+        Span::styled(
+            settings_value_display(m, f),
+            Style::default().fg(Color::Cyan),
+        ),
+    ];
+    if m.dirty.contains_key(&f.key) {
+        spans.push(Span::styled(
+            "  ●edited",
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    // Provenance (non-secret) or secret status source.
+    let meta = if f.secret {
+        m.snapshot
+            .as_ref()
+            .and_then(|s| s.secrets.get(&f.key))
+            .map(|st| format!("[{}]", st.source))
+    } else {
+        m.snapshot
+            .as_ref()
+            .and_then(|s| s.values.get(&f.key))
+            .map(|st| format!("[{}]", st.source))
+    };
+    if let Some(meta) = meta {
+        spans.push(Span::styled(
+            format!("  {meta}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    if f.applies == "restart" {
+        spans.push(Span::styled(
+            "  ⟳restart",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// The active edit buffer line (with a block cursor), shown under the field.
+fn settings_edit_line(m: &SettingsModal) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("      "),
+        Span::styled(m.buffer.clone(), Style::default().fg(Color::White)),
+        Span::styled("█", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            "  (Enter save · Esc cancel)",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ),
+    ])
+}
+
+/// The display string for a field's current (staged-or-effective) value.
+fn settings_value_display(m: &SettingsModal, f: &codeoid_protocol::SettingField) -> String {
+    if f.secret {
+        let set = m
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.secrets.get(&f.key))
+            .is_some_and(|st| st.set);
+        let staged = m.dirty.get(&f.key);
+        return match staged {
+            Some(serde_json::Value::Null) => "· will clear".to_string(),
+            Some(_) => "•••••••• (will update)".to_string(),
+            None if set => "•••••••• (set)".to_string(),
+            None => "not set".to_string(),
+        };
+    }
+    let v = m.effective(&f.key);
+    match &v {
+        serde_json::Value::Null => "—".to_string(),
+        serde_json::Value::Bool(b) => {
+            if *b {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            }
+        }
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(a) => {
+            let items: Vec<String> = a
+                .iter()
+                .filter_map(|x| x.as_str().map(ToString::to_string))
+                .collect();
+            if items.is_empty() {
+                "—".to_string()
+            } else {
+                items.join(", ")
+            }
+        }
+        other => other.to_string(),
     }
 }
 

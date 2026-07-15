@@ -282,6 +282,10 @@ impl App {
                     Some(crate::state::Modal::ConfirmDestroy { .. }) => {
                         crate::keymap::ModalKind::ConfirmDestroy
                     }
+                    Some(crate::state::Modal::Settings(m)) if m.editing.is_some() => {
+                        crate::keymap::ModalKind::SettingsEdit
+                    }
+                    Some(crate::state::Modal::Settings(_)) => crate::keymap::ModalKind::Settings,
                     Some(_) => crate::keymap::ModalKind::Generic,
                     None => crate::keymap::ModalKind::None,
                 };
@@ -314,6 +318,17 @@ impl App {
                 } else if matches!(modal_kind, crate::keymap::ModalKind::UiDialogText) {
                     // Unbound keys edit the dialog's text buffer.
                     if let Some(Modal::UiDialog(m)) = state.modal.as_mut() {
+                        match key.code {
+                            crossterm::event::KeyCode::Char(c) => m.buffer.push(c),
+                            crossterm::event::KeyCode::Backspace => {
+                                m.buffer.pop();
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if matches!(modal_kind, crate::keymap::ModalKind::SettingsEdit) {
+                    // Unbound keys edit the settings field's text buffer.
+                    if let Some(Modal::Settings(m)) = state.modal.as_mut() {
                         match key.code {
                             crossterm::event::KeyCode::Char(c) => m.buffer.push(c),
                             crossterm::event::KeyCode::Backspace => {
@@ -493,6 +508,207 @@ impl App {
             Action::UiDialogNo => self.answer_ui_dialog_confirm(false).await,
             Action::UiDialogSubmit => self.submit_ui_dialog().await,
             Action::UiDialogCancel => self.cancel_ui_dialog().await,
+            Action::SettingsNextField => {
+                if let Some(Modal::Settings(m)) = state.modal.as_mut() {
+                    m.next_field();
+                }
+            }
+            Action::SettingsPrevField => {
+                if let Some(Modal::Settings(m)) = state.modal.as_mut() {
+                    m.prev_field();
+                }
+            }
+            Action::SettingsNextTab => {
+                if let Some(Modal::Settings(m)) = state.modal.as_mut() {
+                    m.next_tab();
+                }
+            }
+            Action::SettingsPrevTab => {
+                if let Some(Modal::Settings(m)) = state.modal.as_mut() {
+                    m.prev_tab();
+                }
+            }
+            Action::SettingsToggleAdvanced => {
+                if let Some(Modal::Settings(m)) = state.modal.as_mut() {
+                    m.show_advanced = !m.show_advanced;
+                    m.selected = 0;
+                }
+            }
+            Action::SettingsClearField => {
+                if let Some(Modal::Settings(m)) = state.modal.as_mut() {
+                    if let Some(f) = m.selected_field() {
+                        m.dirty.insert(f.key, serde_json::Value::Null);
+                    }
+                }
+            }
+            Action::SettingsClose => {
+                state.modal = None;
+            }
+            Action::SettingsActivate => self.settings_activate(),
+            Action::SettingsEditCommit => self.settings_commit_edit(),
+            Action::SettingsEditCancel => {
+                if let Some(Modal::Settings(m)) = state.modal.as_mut() {
+                    m.editing = None;
+                    m.buffer.clear();
+                }
+            }
+            Action::SettingsSave => self.save_settings().await,
+            Action::SettingsRefresh => self.refresh_settings().await,
+        }
+    }
+
+    /// Activate the selected settings field: toggle a boolean, cycle an enum,
+    /// or drop into the text buffer for a text/number/secret field.
+    fn settings_activate(&mut self) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let Some(Modal::Settings(m)) = state.modal.as_mut() else {
+            return;
+        };
+        let Some(f) = m.selected_field() else {
+            return;
+        };
+        let key = f.key.clone();
+        match f.kind.as_str() {
+            "boolean" => {
+                let cur = m.effective(&key).as_bool().unwrap_or(false);
+                m.dirty.insert(key, serde_json::Value::Bool(!cur));
+            }
+            "enum" => {
+                let opts: Vec<String> = f
+                    .options
+                    .as_ref()
+                    .map(|o| o.iter().map(|x| x.value.clone()).collect())
+                    .unwrap_or_default();
+                if opts.is_empty() {
+                    return;
+                }
+                let cur = m.effective(&key);
+                let cur_s = cur.as_str().unwrap_or("");
+                let idx = opts.iter().position(|o| o == cur_s).unwrap_or(0);
+                let next = opts[(idx + 1) % opts.len()].clone();
+                m.dirty.insert(key, serde_json::Value::String(next));
+            }
+            _ => {
+                // text / int / float / string[] / secret → open the buffer.
+                m.buffer = if f.secret {
+                    String::new()
+                } else {
+                    value_to_edit_string(&m.effective(&key))
+                };
+                m.editing = Some(key);
+            }
+        }
+    }
+
+    /// Commit the in-progress text edit into staged changes.
+    fn settings_commit_edit(&mut self) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let Some(Modal::Settings(m)) = state.modal.as_mut() else {
+            return;
+        };
+        let Some(key) = m.editing.take() else {
+            return;
+        };
+        let buf = std::mem::take(&mut m.buffer);
+        let Some(kind) = m.field_kind(&key) else {
+            return;
+        };
+        let value = edit_string_to_value(&kind, &buf);
+        // An empty secret buffer means "leave it as-is" (clear is a separate
+        // action) — anything else stages the change.
+        if kind == "secret" && value.is_null() {
+            m.dirty.remove(&key);
+        } else {
+            m.dirty.insert(key, value);
+        }
+    }
+
+    /// Open the daemon-wide settings screen: fetch the manifest + values.
+    async fn open_settings(&mut self) {
+        let schema_id = ClientHandle::next_request_id();
+        let get_id = ClientHandle::next_request_id();
+        if let Some(state) = self.state.as_mut() {
+            let mut modal = crate::state::SettingsModal::new();
+            modal.pending_schema_id = Some(schema_id.clone());
+            modal.pending_get_id = Some(get_id.clone());
+            state.modal = Some(Modal::Settings(modal));
+        }
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
+        if let Err(e) = handle
+            .send(ClientMessage::SettingsSchema {
+                id: schema_id.clone(),
+            })
+            .await
+        {
+            if let Some(state) = self.state.as_mut() {
+                if let Some(Modal::Settings(m)) = state.modal.as_mut() {
+                    m.loading = false;
+                    m.error = Some(format!("failed to send: {e}"));
+                }
+            }
+            return;
+        }
+        let _ = handle.send(ClientMessage::SettingsGet { id: get_id }).await;
+    }
+
+    /// Re-fetch the current settings values.
+    async fn refresh_settings(&mut self) {
+        let get_id = ClientHandle::next_request_id();
+        {
+            let Some(state) = self.state.as_mut() else {
+                return;
+            };
+            let Some(Modal::Settings(m)) = state.modal.as_mut() else {
+                return;
+            };
+            m.pending_get_id = Some(get_id.clone());
+            m.loading = true;
+        }
+        if let Some(handle) = self.handle.clone() {
+            let _ = handle.send(ClientMessage::SettingsGet { id: get_id }).await;
+        }
+    }
+
+    /// Persist all staged settings edits as one `settings.set` batch.
+    async fn save_settings(&mut self) {
+        let set_id = ClientHandle::next_request_id();
+        let patches = {
+            let Some(state) = self.state.as_mut() else {
+                return;
+            };
+            let Some(Modal::Settings(m)) = state.modal.as_mut() else {
+                return;
+            };
+            if m.dirty.is_empty() {
+                m.status = Some("no changes to save".into());
+                return;
+            }
+            m.pending_set_id = Some(set_id.clone());
+            m.status = Some("saving…".into());
+            m.patches()
+        };
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
+        if let Err(e) = handle
+            .send(ClientMessage::SettingsSet {
+                id: set_id,
+                patches,
+            })
+            .await
+        {
+            if let Some(state) = self.state.as_mut() {
+                if let Some(Modal::Settings(m)) = state.modal.as_mut() {
+                    m.status = Some(format!("failed to send: {e}"));
+                    m.pending_set_id = None;
+                }
+            }
         }
     }
 
@@ -930,6 +1146,65 @@ impl App {
                     }
                 }
             }
+            DaemonMessage::SettingsSchemaResult {
+                request_id,
+                manifest,
+            } => {
+                if let Some(Modal::Settings(m)) = state.modal.as_mut() {
+                    if m.pending_schema_id.as_deref() == Some(request_id.as_str()) {
+                        m.manifest = Some(manifest);
+                        m.pending_schema_id = None;
+                        m.selected = 0;
+                        if m.snapshot.is_some() {
+                            m.loading = false;
+                        }
+                    }
+                }
+            }
+            DaemonMessage::SettingsGetResult {
+                request_id,
+                snapshot,
+            } => {
+                if let Some(Modal::Settings(m)) = state.modal.as_mut() {
+                    if m.pending_get_id.as_deref() == Some(request_id.as_str()) {
+                        m.snapshot = Some(snapshot);
+                        m.pending_get_id = None;
+                        if m.manifest.is_some() {
+                            m.loading = false;
+                        }
+                    }
+                }
+            }
+            DaemonMessage::SettingsSetResult {
+                request_id,
+                ok,
+                snapshot,
+                errors,
+                restart_required,
+            } => {
+                if let Some(Modal::Settings(m)) = state.modal.as_mut() {
+                    if m.pending_set_id.as_deref() == Some(request_id.as_str()) {
+                        m.pending_set_id = None;
+                        m.snapshot = Some(snapshot);
+                        if ok {
+                            m.dirty.clear();
+                            if restart_required {
+                                m.restart_required = true;
+                                m.status = Some("saved — restart the daemon to apply".into());
+                            } else {
+                                m.status = Some("saved".into());
+                            }
+                        } else {
+                            m.status = Some(
+                                errors
+                                    .first()
+                                    .map(|e| format!("{}: {}", e.key, e.message))
+                                    .unwrap_or_else(|| "save failed".into()),
+                            );
+                        }
+                    }
+                }
+            }
             DaemonMessage::SessionUiRequest(req) => {
                 state.add_ui_request(req);
                 state.maybe_open_ui_dialog();
@@ -1273,6 +1548,9 @@ impl App {
             }
             SlashCommand::Capabilities(tab) => {
                 self.open_capabilities(tab).await;
+            }
+            SlashCommand::Settings => {
+                self.open_settings().await;
             }
             SlashCommand::Export { path } => {
                 self.export_focused(path).await;
@@ -1942,6 +2220,71 @@ fn autocomplete_command(state: &mut AppState) {
 /// before the first frame, when we don't yet know the viewport size.
 fn page_step(state: &AppState) -> usize {
     usize::from(state.last_viewport_rows.saturating_sub(1).max(10))
+}
+
+/// Render a settings value as the seed text for the edit buffer.
+fn value_to_edit_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(a) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(ToString::to_string))
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => other.to_string(),
+    }
+}
+
+/// Parse an edit buffer back into a JSON value for the field's kind. An empty
+/// buffer becomes `Null` (clear / unset).
+fn edit_string_to_value(kind: &str, buf: &str) -> serde_json::Value {
+    let trimmed = buf.trim();
+    match kind {
+        "int" => {
+            if trimmed.is_empty() {
+                serde_json::Value::Null
+            } else {
+                trimmed
+                    .parse::<i64>()
+                    .map(serde_json::Value::from)
+                    .unwrap_or(serde_json::Value::Null)
+            }
+        }
+        "float" => {
+            if trimmed.is_empty() {
+                serde_json::Value::Null
+            } else {
+                trimmed
+                    .parse::<f64>()
+                    .ok()
+                    .and_then(serde_json::Number::from_f64)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null)
+            }
+        }
+        "string[]" => {
+            let items: Vec<serde_json::Value> = buf
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| serde_json::Value::String(s.to_string()))
+                .collect();
+            if items.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::Array(items)
+            }
+        }
+        _ => {
+            // string / enum / secret
+            if trimmed.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(buf.to_string())
+            }
+        }
+    }
 }
 
 /// Returns `true` if the app's visual state will change on the next tick —
