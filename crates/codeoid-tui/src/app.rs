@@ -327,10 +327,16 @@ impl App {
                         }
                     }
                 } else if matches!(modal_kind, crate::keymap::ModalKind::SettingsEdit) {
-                    // Unbound keys edit the settings field's text buffer.
+                    // Unbound keys edit the settings field's text buffer. Skip
+                    // Ctrl/Alt-modified chars so a shortcut chord (Ctrl+A, …)
+                    // doesn't insert its base letter into the value.
                     if let Some(Modal::Settings(m)) = state.modal.as_mut() {
+                        let plain = !key.modifiers.intersects(
+                            crossterm::event::KeyModifiers::CONTROL
+                                | crossterm::event::KeyModifiers::ALT,
+                        );
                         match key.code {
-                            crossterm::event::KeyCode::Char(c) => m.buffer.push(c),
+                            crossterm::event::KeyCode::Char(c) if plain => m.buffer.push(c),
                             crossterm::event::KeyCode::Backspace => {
                                 m.buffer.pop();
                             }

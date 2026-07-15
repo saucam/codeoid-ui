@@ -43,23 +43,18 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
 /// and (when a text field is active) an edit buffer.
 #[allow(clippy::too_many_lines)]
 fn render_settings(frame: &mut Frame<'_>, area: Rect, m: &SettingsModal) {
-    let mut rows: Vec<Line<'static>> = Vec::new();
+    use ratatui::widgets::Wrap;
 
-    if m.loading && m.manifest.is_none() {
-        rows.push(Line::from(Span::styled(
-            "loading…",
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-    if let Some(err) = &m.error {
-        rows.push(Line::from(Span::styled(
-            err.clone(),
-            Style::default().fg(Color::Red),
-        )));
-    }
+    let block = Block::default()
+        .title(" Settings ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
+    // ── Header: the tab rail, always visible (never scrolls). ──
+    let mut header_rows: Vec<Line<'static>> = Vec::new();
     if let Some(manifest) = &m.manifest {
-        // Tab rail.
         let mut pills: Vec<Span<'static>> = Vec::new();
         for (i, t) in manifest.tabs.iter().enumerate() {
             let active = i == m.tab;
@@ -78,21 +73,33 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, m: &SettingsModal) {
             pills.push(Span::styled(label, style));
             pills.push(Span::raw(" "));
         }
-        rows.push(Line::from(pills));
-        rows.push(Line::raw(""));
+        header_rows.push(Line::from(pills));
+    } else if m.loading {
+        header_rows.push(hint_line("loading…"));
+    }
+    header_rows.push(Line::raw(""));
 
+    // ── Body: the active tab's fields, scrollable. Track the line index of
+    // the selected field so the viewport can follow it. ──
+    let mut body_rows: Vec<Line<'static>> = Vec::new();
+    let mut selected_row = 0usize;
+    if let Some(err) = &m.error {
+        body_rows.push(Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    if let Some(manifest) = &m.manifest {
         if let Some(tab) = manifest.tabs.get(m.tab) {
             if let Some(desc) = &tab.description {
-                rows.push(Line::from(Span::styled(
+                body_rows.push(Line::from(Span::styled(
                     desc.clone(),
                     Style::default()
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::ITALIC),
                 )));
-                rows.push(Line::raw(""));
+                body_rows.push(Line::raw(""));
             }
-            // Walk groups → visible fields, tracking a running visible index
-            // so the cursor lines up with `m.selected` / `tab_fields()`.
             let mut idx = 0usize;
             for group in &tab.groups {
                 let visible: Vec<&codeoid_protocol::SettingField> = group
@@ -103,7 +110,7 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, m: &SettingsModal) {
                 if visible.is_empty() {
                     continue;
                 }
-                rows.push(Line::from(Span::styled(
+                body_rows.push(Line::from(Span::styled(
                     group.title.clone(),
                     Style::default()
                         .fg(Color::Yellow)
@@ -111,14 +118,17 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, m: &SettingsModal) {
                 )));
                 for f in visible {
                     let selected = idx == m.selected;
-                    rows.push(settings_field_line(m, f, selected));
+                    if selected {
+                        selected_row = body_rows.len();
+                    }
+                    body_rows.push(settings_field_line(m, f, selected));
                     if selected {
                         if let Some(editing_key) = &m.editing {
                             if editing_key == &f.key {
-                                rows.push(settings_edit_line(m));
+                                body_rows.push(settings_edit_line(m));
                             }
                         } else if !f.help.is_empty() {
-                            rows.push(Line::from(Span::styled(
+                            body_rows.push(Line::from(Span::styled(
                                 format!("      {}", f.help),
                                 Style::default().fg(Color::DarkGray),
                             )));
@@ -126,54 +136,79 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, m: &SettingsModal) {
                     }
                     idx += 1;
                 }
-                rows.push(Line::raw(""));
+                body_rows.push(Line::raw(""));
             }
         }
     }
 
-    // Footer: dirty count + status + backing file paths + hints.
-    let dirty = m.dirty.len();
-    let mut footer: Vec<Span<'static>> = Vec::new();
-    if dirty > 0 {
-        footer.push(Span::styled(
-            format!("{dirty} unsaved "),
+    // ── Footer: dirty count + status + file paths + key hints (fixed). ──
+    let mut footer_rows: Vec<Line<'static>> = Vec::new();
+    let mut status_spans: Vec<Span<'static>> = Vec::new();
+    if !m.dirty.is_empty() {
+        status_spans.push(Span::styled(
+            format!("{} unsaved ", m.dirty.len()),
             Style::default().fg(Color::Cyan),
         ));
     }
     if m.restart_required {
-        footer.push(Span::styled(
+        status_spans.push(Span::styled(
             "· restart to apply ",
             Style::default().fg(Color::Yellow),
         ));
     }
     if let Some(status) = &m.status {
-        footer.push(Span::styled(
+        status_spans.push(Span::styled(
             format!("· {status} "),
             Style::default().fg(Color::Green),
         ));
     }
-    if !footer.is_empty() {
-        rows.push(Line::from(footer));
+    if !status_spans.is_empty() {
+        footer_rows.push(Line::from(status_spans));
     }
     if let Some(snap) = &m.snapshot {
-        rows.push(Line::from(Span::styled(
+        footer_rows.push(Line::from(Span::styled(
             format!("files: {} · {}", snap.config_path, snap.env_path),
             Style::default().fg(Color::DarkGray),
         )));
     }
-    rows.push(hint_line(
+    footer_rows.push(hint_line(
         "↑↓ field · ←→ tab · Enter toggle/edit · s save · a advanced · x clear · r refresh · Esc close",
     ));
 
-    let block = Block::default()
-        .title(" Settings ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+    // ── Layout: header / scrollable body / footer. ──
+    let header_h = u16::try_from(header_rows.len()).unwrap_or(2);
+    let footer_h = u16::try_from(footer_rows.len()).unwrap_or(1);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_h),
+            Constraint::Min(1),
+            Constraint::Length(footer_h),
+        ])
+        .split(inner);
+
+    // Keep the selected field within the body viewport (centered-ish).
+    let body_h = chunks[1].height as usize;
+    let total = body_rows.len();
+    let scroll_y = if total <= body_h || body_h == 0 {
+        0
+    } else {
+        selected_row.saturating_sub(body_h / 2).min(total - body_h)
+    };
+
     frame.render_widget(
-        Paragraph::new(rows)
-            .block(block)
-            .wrap(ratatui::widgets::Wrap { trim: false }),
-        area,
+        Paragraph::new(header_rows).wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(body_rows)
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(scroll_y).unwrap_or(0), 0)),
+        chunks[1],
+    );
+    frame.render_widget(
+        Paragraph::new(footer_rows).wrap(Wrap { trim: false }),
+        chunks[2],
     );
 }
 
