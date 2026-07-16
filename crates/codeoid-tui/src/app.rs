@@ -2251,10 +2251,14 @@ fn edit_string_to_value(kind: &str, buf: &str) -> serde_json::Value {
             if trimmed.is_empty() {
                 serde_json::Value::Null
             } else {
+                // On a parse failure keep the raw text (as a string) rather
+                // than Null — Null would silently CLEAR the setting on save.
+                // Sending the string lets the daemon reject it with a proper
+                // validation error the user can see.
                 trimmed
                     .parse::<i64>()
                     .map(serde_json::Value::from)
-                    .unwrap_or(serde_json::Value::Null)
+                    .unwrap_or_else(|_| serde_json::Value::String(trimmed.to_string()))
             }
         }
         "float" => {
@@ -2266,7 +2270,7 @@ fn edit_string_to_value(kind: &str, buf: &str) -> serde_json::Value {
                     .ok()
                     .and_then(serde_json::Number::from_f64)
                     .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null)
+                    .unwrap_or_else(|| serde_json::Value::String(trimmed.to_string()))
             }
         }
         "string[]" => {
