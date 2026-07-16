@@ -9,7 +9,8 @@ use ratatui::Frame;
 use codeoid_protocol::UiRequestMethod;
 
 use crate::state::{
-    AppState, AskUserQuestionModal, CapabilitiesModal, CapabilitiesTab, Modal, UiDialogModal,
+    AppState, AskUserQuestionModal, CapabilitiesModal, CapabilitiesTab, Modal, SettingsModal,
+    UiDialogModal,
 };
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
@@ -20,6 +21,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     // Capabilities and AskUserQuestion deserve more screen real estate
     // for entries / question lists.
     let area = match modal {
+        Modal::Settings(_) => centered(frame.area(), 82, 82),
         Modal::Capabilities(_) | Modal::AskUserQuestion(_) => centered(frame.area(), 80, 75),
         _ => centered(frame.area(), 60, 50),
     };
@@ -32,6 +34,293 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         Modal::Capabilities(c) => render_capabilities(frame, area, c),
         Modal::AskUserQuestion(m) => render_ask_user_question(frame, area, m),
         Modal::UiDialog(m) => render_ui_dialog(frame, area, m),
+        Modal::Settings(m) => render_settings(frame, area, m),
+    }
+}
+
+/// The comprehensive settings screen — tab pills + the active tab's grouped
+/// fields with an inline control per `kind`, staged-edit markers, provenance,
+/// and (when a text field is active) an edit buffer.
+#[allow(clippy::too_many_lines)]
+fn render_settings(frame: &mut Frame<'_>, area: Rect, m: &SettingsModal) {
+    use ratatui::widgets::Wrap;
+
+    let block = Block::default()
+        .title(" Settings ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // ── Header: the tab rail, always visible (never scrolls). ──
+    let mut header_rows: Vec<Line<'static>> = Vec::new();
+    if let Some(manifest) = &m.manifest {
+        let mut pills: Vec<Span<'static>> = Vec::new();
+        for (i, t) in manifest.tabs.iter().enumerate() {
+            let active = i == m.tab;
+            let label = match &t.icon {
+                Some(icon) => format!(" {icon} {} ", t.title),
+                None => format!(" {} ", t.title),
+            };
+            let style = if active {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            pills.push(Span::styled(label, style));
+            pills.push(Span::raw(" "));
+        }
+        header_rows.push(Line::from(pills));
+    } else if m.loading {
+        header_rows.push(hint_line("loading…"));
+    }
+    header_rows.push(Line::raw(""));
+
+    // ── Body: the active tab's fields, scrollable. Track the line index of
+    // the selected field so the viewport can follow it. ──
+    let mut body_rows: Vec<Line<'static>> = Vec::new();
+    let mut selected_row = 0usize;
+    if let Some(err) = &m.error {
+        body_rows.push(Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    if let Some(manifest) = &m.manifest {
+        if let Some(tab) = manifest.tabs.get(m.tab) {
+            if let Some(desc) = &tab.description {
+                body_rows.push(Line::from(Span::styled(
+                    desc.clone(),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )));
+                body_rows.push(Line::raw(""));
+            }
+            let mut idx = 0usize;
+            for group in &tab.groups {
+                let visible: Vec<&codeoid_protocol::SettingField> = group
+                    .fields
+                    .iter()
+                    .filter(|f| m.show_advanced || !f.advanced)
+                    .collect();
+                if visible.is_empty() {
+                    continue;
+                }
+                body_rows.push(Line::from(Span::styled(
+                    group.title.clone(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                for f in visible {
+                    let selected = idx == m.selected;
+                    if selected {
+                        selected_row = body_rows.len();
+                    }
+                    body_rows.push(settings_field_line(m, f, selected));
+                    if selected {
+                        if let Some(editing_key) = &m.editing {
+                            if editing_key == &f.key {
+                                body_rows.push(settings_edit_line(m));
+                            }
+                        } else if !f.help.is_empty() {
+                            body_rows.push(Line::from(Span::styled(
+                                format!("      {}", f.help),
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                        }
+                    }
+                    idx += 1;
+                }
+                body_rows.push(Line::raw(""));
+            }
+        }
+    }
+
+    // ── Footer: dirty count + status + file paths + key hints (fixed). ──
+    let mut footer_rows: Vec<Line<'static>> = Vec::new();
+    let mut status_spans: Vec<Span<'static>> = Vec::new();
+    if !m.dirty.is_empty() {
+        status_spans.push(Span::styled(
+            format!("{} unsaved ", m.dirty.len()),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    if m.restart_required {
+        status_spans.push(Span::styled(
+            "· restart to apply ",
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    if let Some(status) = &m.status {
+        status_spans.push(Span::styled(
+            format!("· {status} "),
+            Style::default().fg(Color::Green),
+        ));
+    }
+    if !status_spans.is_empty() {
+        footer_rows.push(Line::from(status_spans));
+    }
+    if let Some(snap) = &m.snapshot {
+        footer_rows.push(Line::from(Span::styled(
+            format!("files: {} · {}", snap.config_path, snap.env_path),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    footer_rows.push(hint_line(
+        "↑↓ field · ←→ tab · Enter toggle/edit · s save · a advanced · x clear · r refresh · Esc close",
+    ));
+
+    // ── Layout: header / scrollable body / footer. ──
+    let header_h = u16::try_from(header_rows.len()).unwrap_or(2);
+    let footer_h = u16::try_from(footer_rows.len()).unwrap_or(1);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_h),
+            Constraint::Min(1),
+            Constraint::Length(footer_h),
+        ])
+        .split(inner);
+
+    // Keep the selected field within the body viewport (centered-ish).
+    let body_h = chunks[1].height as usize;
+    let total = body_rows.len();
+    let scroll_y = if total <= body_h || body_h == 0 {
+        0
+    } else {
+        selected_row.saturating_sub(body_h / 2).min(total - body_h)
+    };
+
+    frame.render_widget(
+        Paragraph::new(header_rows).wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(body_rows)
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(scroll_y).unwrap_or(0), 0)),
+        chunks[1],
+    );
+    frame.render_widget(
+        Paragraph::new(footer_rows).wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+}
+
+/// One field row: cursor + label + its current control state + badges.
+fn settings_field_line(
+    m: &SettingsModal,
+    f: &codeoid_protocol::SettingField,
+    selected: bool,
+) -> Line<'static> {
+    let cursor = if selected { "▶ " } else { "  " };
+    let name_style = if selected {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let mut spans = vec![
+        Span::styled(cursor.to_string(), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("{}: ", f.label), name_style),
+        Span::styled(
+            settings_value_display(m, f),
+            Style::default().fg(Color::Cyan),
+        ),
+    ];
+    if m.dirty.contains_key(&f.key) {
+        spans.push(Span::styled(
+            "  ●edited",
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    // Provenance (non-secret) or secret status source.
+    let meta = if f.secret {
+        m.snapshot
+            .as_ref()
+            .and_then(|s| s.secrets.get(&f.key))
+            .map(|st| format!("[{}]", st.source))
+    } else {
+        m.snapshot
+            .as_ref()
+            .and_then(|s| s.values.get(&f.key))
+            .map(|st| format!("[{}]", st.source))
+    };
+    if let Some(meta) = meta {
+        spans.push(Span::styled(
+            format!("  {meta}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    if f.applies == "restart" {
+        spans.push(Span::styled(
+            "  ⟳restart",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// The active edit buffer line (with a block cursor), shown under the field.
+fn settings_edit_line(m: &SettingsModal) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("      "),
+        Span::styled(m.buffer.clone(), Style::default().fg(Color::White)),
+        Span::styled("█", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            "  (Enter save · Esc cancel)",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ),
+    ])
+}
+
+/// The display string for a field's current (staged-or-effective) value.
+fn settings_value_display(m: &SettingsModal, f: &codeoid_protocol::SettingField) -> String {
+    if f.secret {
+        let set = m
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.secrets.get(&f.key))
+            .is_some_and(|st| st.set);
+        let staged = m.dirty.get(&f.key);
+        return match staged {
+            Some(serde_json::Value::Null) => "· will clear".to_string(),
+            Some(_) => "•••••••• (will update)".to_string(),
+            None if set => "•••••••• (set)".to_string(),
+            None => "not set".to_string(),
+        };
+    }
+    let v = m.effective(&f.key);
+    match &v {
+        serde_json::Value::Null => "—".to_string(),
+        serde_json::Value::Bool(b) => {
+            if *b {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            }
+        }
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(a) => {
+            let items: Vec<String> = a
+                .iter()
+                .filter_map(|x| x.as_str().map(ToString::to_string))
+                .collect();
+            if items.is_empty() {
+                "—".to_string()
+            } else {
+                items.join(", ")
+            }
+        }
+        other => other.to_string(),
     }
 }
 

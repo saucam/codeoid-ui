@@ -544,6 +544,7 @@ pub enum Modal {
     Capabilities(CapabilitiesModal),
     AskUserQuestion(AskUserQuestionModal),
     UiDialog(UiDialogModal),
+    Settings(SettingsModal),
 }
 
 /// Modal for a provider-initiated dialog (`session.ui_request`). Unlike
@@ -737,6 +738,165 @@ impl CapabilitiesModal {
             pending_request_id: None,
             selected: 0,
         }
+    }
+}
+
+/// The comprehensive settings screen. Renders whatever manifest the daemon
+/// serves over `settings.schema` (daemon-wide — no session needed): a tab
+/// rail (one per manifest tab, incl. a tab per backend) + grouped fields with
+/// a per-`kind` control. Edits are staged in `dirty` and committed as one
+/// `settings.set` batch. Text/number/secret fields drop into `editing` +
+/// `buffer` (a hand-rolled input, like the UiDialog text path); booleans and
+/// enums toggle/cycle in place.
+#[derive(Debug, Clone)]
+pub struct SettingsModal {
+    pub loading: bool,
+    pub error: Option<String>,
+    pub manifest: Option<codeoid_protocol::SettingsManifest>,
+    pub snapshot: Option<codeoid_protocol::SettingsSnapshot>,
+    /// Active tab index into `manifest.tabs`.
+    pub tab: usize,
+    /// Selected field index within the active tab's visible fields.
+    pub selected: usize,
+    pub show_advanced: bool,
+    /// Staged edits, keyed by field key. `Value::Null` = clear / unset.
+    pub dirty: std::collections::HashMap<String, serde_json::Value>,
+    /// Field key currently in text-edit mode (`None` = navigating).
+    pub editing: Option<String>,
+    /// Text buffer backing the active edit.
+    pub buffer: String,
+    /// Last save outcome, shown in the footer.
+    pub status: Option<String>,
+    pub restart_required: bool,
+    pub pending_schema_id: Option<String>,
+    pub pending_get_id: Option<String>,
+    pub pending_set_id: Option<String>,
+}
+
+impl Default for SettingsModal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SettingsModal {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            loading: true,
+            error: None,
+            manifest: None,
+            snapshot: None,
+            tab: 0,
+            selected: 0,
+            show_advanced: false,
+            dirty: std::collections::HashMap::new(),
+            editing: None,
+            buffer: String::new(),
+            status: None,
+            restart_required: false,
+            pending_schema_id: None,
+            pending_get_id: None,
+            pending_set_id: None,
+        }
+    }
+
+    /// Fields visible on the active tab (advanced hidden unless toggled).
+    #[must_use]
+    pub fn tab_fields(&self) -> Vec<&codeoid_protocol::SettingField> {
+        let Some(m) = self.manifest.as_ref() else {
+            return Vec::new();
+        };
+        let Some(t) = m.tabs.get(self.tab) else {
+            return Vec::new();
+        };
+        t.groups
+            .iter()
+            .flat_map(|g| g.fields.iter())
+            .filter(|f| self.show_advanced || !f.advanced)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn tab_count(&self) -> usize {
+        self.manifest.as_ref().map_or(0, |m| m.tabs.len())
+    }
+
+    /// The field the cursor is on (cloned so callers avoid borrow conflicts).
+    #[must_use]
+    pub fn selected_field(&self) -> Option<codeoid_protocol::SettingField> {
+        self.tab_fields().get(self.selected).map(|f| (*f).clone())
+    }
+
+    pub fn next_field(&mut self) {
+        let n = self.tab_fields().len();
+        if n > 0 {
+            self.selected = (self.selected + 1) % n;
+        }
+    }
+
+    pub fn prev_field(&mut self) {
+        let n = self.tab_fields().len();
+        if n > 0 {
+            self.selected = (self.selected + n - 1) % n;
+        }
+    }
+
+    pub fn next_tab(&mut self) {
+        let n = self.tab_count();
+        if n > 0 {
+            self.tab = (self.tab + 1) % n;
+            self.selected = 0;
+        }
+    }
+
+    pub fn prev_tab(&mut self) {
+        let n = self.tab_count();
+        if n > 0 {
+            self.tab = (self.tab + n - 1) % n;
+            self.selected = 0;
+        }
+    }
+
+    /// Staged-or-current value of a non-secret field key.
+    #[must_use]
+    pub fn effective(&self, key: &str) -> serde_json::Value {
+        if let Some(v) = self.dirty.get(key) {
+            return v.clone();
+        }
+        if let Some(snap) = self.snapshot.as_ref() {
+            if let Some(st) = snap.values.get(key) {
+                return st.value.clone();
+            }
+        }
+        serde_json::Value::Null
+    }
+
+    /// The `kind` of a field anywhere in the manifest (used when committing
+    /// an edit — the edited field is always on the active tab, but searching
+    /// the whole manifest keeps this robust).
+    #[must_use]
+    pub fn field_kind(&self, key: &str) -> Option<String> {
+        self.manifest
+            .as_ref()?
+            .tabs
+            .iter()
+            .flat_map(|t| t.groups.iter())
+            .flat_map(|g| g.fields.iter())
+            .find(|f| f.key == key)
+            .map(|f| f.kind.clone())
+    }
+
+    /// The `settings.set` patch batch for the current staged edits.
+    #[must_use]
+    pub fn patches(&self) -> Vec<codeoid_protocol::SettingPatch> {
+        self.dirty
+            .iter()
+            .map(|(key, value)| codeoid_protocol::SettingPatch {
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect()
     }
 }
 

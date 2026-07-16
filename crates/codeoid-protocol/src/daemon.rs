@@ -17,6 +17,8 @@
 //! introduces that this crate doesn't know about. The TUI logs + ignores it,
 //! matching the daemon's "frontends ignore unknown kinds" design.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -174,9 +176,144 @@ pub enum DaemonMessage {
         commands: Vec<ProviderCommand>,
     },
 
+    /// Reply to `settings.schema` — the declarative settings manifest.
+    #[serde(rename = "settings.schema.result", rename_all = "camelCase")]
+    SettingsSchemaResult {
+        request_id: String,
+        manifest: SettingsManifest,
+    },
+
+    /// Reply to `settings.get` — current effective values + secret presence.
+    #[serde(rename = "settings.get.result", rename_all = "camelCase")]
+    SettingsGetResult {
+        request_id: String,
+        snapshot: SettingsSnapshot,
+    },
+
+    /// Reply to `settings.set` — outcome + the post-write snapshot.
+    #[serde(rename = "settings.set.result", rename_all = "camelCase")]
+    SettingsSetResult {
+        request_id: String,
+        ok: bool,
+        snapshot: SettingsSnapshot,
+        errors: Vec<SettingError>,
+        restart_required: bool,
+    },
+
     /// Forward-compat sink. Preserves raw JSON so the TUI can log it.
     #[serde(other)]
     Unknown,
+}
+
+// ── Settings manifest + snapshot (mirrors codeoid/packages/protocol settings.ts) ──
+
+/// The declarative settings manifest served over `settings.schema`. Rendered
+/// generically — `kind` / `backing` / `source` are kept as strings so a new
+/// value the daemon introduces never breaks deserialization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsManifest {
+    pub version: u32,
+    pub tabs: Vec<SettingsTab>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsTab {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub groups: Vec<SettingsGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsGroup {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub fields: Vec<SettingField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingField {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub help: String,
+    /// "string" | "boolean" | "int" | "float" | "enum" | "string[]" | "secret".
+    pub kind: String,
+    /// "config" | "env".
+    pub backing: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_var: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<SettingOption>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(default)]
+    pub advanced: bool,
+    #[serde(default)]
+    pub secret: bool,
+    /// "live" | "next-session" | "restart".
+    #[serde(default)]
+    pub applies: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingOption {
+    pub value: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSnapshot {
+    /// key → current non-secret value + provenance.
+    pub values: HashMap<String, SettingState>,
+    /// key → secret presence + source (never the value).
+    pub secrets: HashMap<String, SecretStatus>,
+    pub config_path: String,
+    pub env_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingState {
+    pub value: Value,
+    /// "default" | "config" | "env" | "unset".
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretStatus {
+    pub set: bool,
+    /// "env-file" | "external" | "unset".
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingError {
+    pub key: String,
+    pub message: String,
 }
 
 /// Dialog flavor on a [`SessionUiRequestMsg`].

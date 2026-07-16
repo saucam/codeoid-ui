@@ -522,6 +522,9 @@ fn daemon_kind(msg: &DaemonMessage) -> &'static str {
         DaemonMessage::SessionUiRequest(_) => "session.ui_request",
         DaemonMessage::SessionUiResolved { .. } => "session.ui_resolved",
         DaemonMessage::SessionCommandsResult { .. } => "session.commands.result",
+        DaemonMessage::SettingsSchemaResult { .. } => "settings.schema.result",
+        DaemonMessage::SettingsGetResult { .. } => "settings.get.result",
+        DaemonMessage::SettingsSetResult { .. } => "settings.set.result",
         DaemonMessage::Unknown => "unknown",
     }
 }
@@ -563,6 +566,9 @@ fn client_kind(msg: &ClientMessage) -> &'static str {
         ClientMessage::ClaudeConfig { .. } => "claude.config",
         ClientMessage::SessionExport { .. } => "session.export",
         ClientMessage::SessionImport { .. } => "session.import",
+        ClientMessage::SettingsSchema { .. } => "settings.schema",
+        ClientMessage::SettingsGet { .. } => "settings.get",
+        ClientMessage::SettingsSet { .. } => "settings.set",
     }
 }
 

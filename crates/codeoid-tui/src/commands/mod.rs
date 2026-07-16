@@ -58,6 +58,8 @@ pub enum SlashCommand {
     /// `/agents` `/skills` `/mcp` `/hooks` — open the capabilities
     /// modal scrolled to the relevant tab.
     Capabilities(CapabilitiesTab),
+    /// `/settings` — open the comprehensive settings screen.
+    Settings,
     /// `/export [path]` — write the focused session to a JSON bundle
     /// (under `~/.codeoid/exports/` by default; or to the given path).
     Export { path: Option<String> },
@@ -201,6 +203,7 @@ pub fn parse(text: &str) -> Result<Option<SlashCommand>, ParseError> {
         "skills" | "skill" => SlashCommand::Capabilities(CapabilitiesTab::Skills),
         "mcp" => SlashCommand::Capabilities(CapabilitiesTab::Mcp),
         "hooks" | "hook" => SlashCommand::Capabilities(CapabilitiesTab::Hooks),
+        "settings" | "config" | "prefs" => SlashCommand::Settings,
         "export" | "share" => {
             let path = if rest_of_line.is_empty() {
                 None
@@ -274,6 +277,7 @@ pub const CATALOG: &[(&str, &str)] = &[
     ("/skills", "list slash-skill commands"),
     ("/mcp", "list MCP servers wired in"),
     ("/hooks", "list PreToolUse / PostToolUse hooks"),
+    ("/settings", "open the daemon settings screen"),
     ("/export [path]", "export session as a portable bundle"),
     (
         "/import <bundle> <workdir>",
@@ -576,6 +580,16 @@ mod tests {
     #[test]
     fn fork_is_in_catalog() {
         assert!(CATALOG.iter().any(|(usage, _)| usage.starts_with("/fork")));
+    }
+
+    #[test]
+    fn settings_command_and_aliases() {
+        assert_eq!(parse("/settings"), Ok(Some(SlashCommand::Settings)));
+        assert_eq!(parse("/config"), Ok(Some(SlashCommand::Settings)));
+        assert_eq!(parse("/prefs"), Ok(Some(SlashCommand::Settings)));
+        assert!(CATALOG
+            .iter()
+            .any(|(usage, _)| usage.starts_with("/settings")));
     }
 
     #[test]

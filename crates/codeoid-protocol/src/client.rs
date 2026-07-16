@@ -248,6 +248,34 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         write_pinned_files: Option<bool>,
     },
+
+    /// Fetch the declarative settings manifest (tabs → groups → fields).
+    /// Daemon answers with `settings.schema.result`.
+    #[serde(rename = "settings.schema", rename_all = "camelCase")]
+    SettingsSchema { id: String },
+
+    /// Fetch the current effective settings — values + secret presence.
+    /// Daemon answers with `settings.get.result`.
+    #[serde(rename = "settings.get", rename_all = "camelCase")]
+    SettingsGet { id: String },
+
+    /// Apply a batch of settings changes. Daemon answers with
+    /// `settings.set.result` (config patches are validated as a whole — a
+    /// single bad patch rejects the batch).
+    #[serde(rename = "settings.set", rename_all = "camelCase")]
+    SettingsSet {
+        id: String,
+        patches: Vec<SettingPatch>,
+    },
+}
+
+/// One change requested by `settings.set`, addressed by field `key`. The
+/// value is a raw JSON scalar / array / null (`null` clears the field).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingPatch {
+    pub key: String,
+    pub value: serde_json::Value,
 }
 
 /// Source of a `session.import` bundle.
@@ -288,7 +316,10 @@ impl ClientMessage {
             | Self::SessionRename { id, .. }
             | Self::ClaudeConfig { id, .. }
             | Self::SessionExport { id, .. }
-            | Self::SessionImport { id, .. } => id,
+            | Self::SessionImport { id, .. }
+            | Self::SettingsSchema { id }
+            | Self::SettingsGet { id }
+            | Self::SettingsSet { id, .. } => id,
         }
     }
 }

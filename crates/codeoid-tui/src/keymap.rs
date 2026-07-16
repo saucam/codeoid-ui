@@ -73,6 +73,29 @@ pub enum Action {
     /// ConfirmDestroy modal: the user pressed `y` — actually destroy the
     /// session named in the modal.
     ConfirmDestroy,
+    /// Settings modal: move the field cursor down / up (wraps).
+    SettingsNextField,
+    SettingsPrevField,
+    /// Settings modal: switch to the next / previous tab (wraps).
+    SettingsNextTab,
+    SettingsPrevTab,
+    /// Settings modal: activate the selected field — toggles a boolean,
+    /// cycles an enum, or opens a text buffer for text/number/secret kinds.
+    SettingsActivate,
+    /// Settings modal: toggle visibility of `advanced` fields.
+    SettingsToggleAdvanced,
+    /// Settings modal: clear the selected field (unset / remove a secret).
+    SettingsClearField,
+    /// Settings modal: persist all staged edits (`settings.set`).
+    SettingsSave,
+    /// Settings modal: re-fetch the current values from the daemon.
+    SettingsRefresh,
+    /// Settings modal: close (discarding any unsaved staged edits).
+    SettingsClose,
+    /// Settings text-edit: commit the buffer into staged edits.
+    SettingsEditCommit,
+    /// Settings text-edit: cancel the buffer (discard).
+    SettingsEditCancel,
 }
 
 /// What kind of modal is currently open. The AskUserQuestion form needs
@@ -94,6 +117,12 @@ pub enum ModalKind {
     /// The `/destroy` confirmation — `y` destroys, `n`/Esc/`q` cancel,
     /// everything else is absorbed.
     ConfirmDestroy,
+    /// Settings modal, navigation mode — arrows/hjkl move, Enter/Space
+    /// activate, s saves, a toggles advanced, x clears, Esc/q close.
+    Settings,
+    /// Settings modal, a field's text buffer is open — only Enter (commit),
+    /// Esc (cancel), and Ctrl+C (quit) are bound; the rest feeds the buffer.
+    SettingsEdit,
 }
 
 pub fn resolve(
@@ -161,6 +190,41 @@ pub fn resolve(
                 Some(Action::DismissModal)
             }
             (Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
+            _ => None,
+        };
+    }
+
+    // Settings modal, navigation mode. Vim + arrow nav; Enter/Space activate
+    // the selected field; s saves, a toggles advanced, x clears, r refreshes,
+    // Esc/q close. Unbound keys are absorbed so nothing leaks.
+    if matches!(modal_kind, ModalKind::Settings) {
+        return match (event.code, event.modifiers) {
+            (Esc, _) | (Char('q'), KeyModifiers::NONE) => Some(Action::SettingsClose),
+            (Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
+            (Down, _) | (Char('j'), KeyModifiers::NONE) => Some(Action::SettingsNextField),
+            (Up, _) | (Char('k'), KeyModifiers::NONE) => Some(Action::SettingsPrevField),
+            (Tab, _) | (Right, _) | (Char('l'), KeyModifiers::NONE) => {
+                Some(Action::SettingsNextTab)
+            }
+            (BackTab, _) | (Left, _) | (Char('h'), KeyModifiers::NONE) => {
+                Some(Action::SettingsPrevTab)
+            }
+            (Enter, _) | (Char(' '), _) => Some(Action::SettingsActivate),
+            (Char('a'), KeyModifiers::NONE) => Some(Action::SettingsToggleAdvanced),
+            (Char('x'), KeyModifiers::NONE) => Some(Action::SettingsClearField),
+            (Char('s'), KeyModifiers::NONE | KeyModifiers::CONTROL) => Some(Action::SettingsSave),
+            (Char('r'), KeyModifiers::NONE) => Some(Action::SettingsRefresh),
+            _ => None,
+        };
+    }
+
+    // Settings text-edit — only commit/cancel/quit; everything else falls
+    // through so the reducer feeds the field's text buffer.
+    if matches!(modal_kind, ModalKind::SettingsEdit) {
+        return match (event.code, event.modifiers) {
+            (Esc, _) => Some(Action::SettingsEditCancel),
+            (Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
+            (Enter, _) => Some(Action::SettingsEditCommit),
             _ => None,
         };
     }
@@ -691,6 +755,75 @@ mod tests {
         // including y/n/digits, which are regular typing here.
         assert_eq!(resolve(key(KeyCode::Char('y')), false, k, false), None);
         assert_eq!(resolve(key(KeyCode::Char('3')), false, k, false), None);
+        assert_eq!(resolve(key(KeyCode::Backspace), false, k, false), None);
+    }
+
+    // ------------ settings modal ------------
+
+    #[test]
+    fn settings_nav_binds_movement_activate_and_save() {
+        let k = ModalKind::Settings;
+        assert_eq!(
+            resolve(key(KeyCode::Down), false, k, false),
+            Some(Action::SettingsNextField)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('k')), false, k, false),
+            Some(Action::SettingsPrevField)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Tab), false, k, false),
+            Some(Action::SettingsNextTab)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('h')), false, k, false),
+            Some(Action::SettingsPrevTab)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Enter), false, k, false),
+            Some(Action::SettingsActivate)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('s')), false, k, false),
+            Some(Action::SettingsSave)
+        );
+        assert_eq!(
+            resolve(ctrl(KeyCode::Char('s')), false, k, false),
+            Some(Action::SettingsSave)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('a')), false, k, false),
+            Some(Action::SettingsToggleAdvanced)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Esc), false, k, false),
+            Some(Action::SettingsClose)
+        );
+        assert_eq!(
+            resolve(ctrl(KeyCode::Char('c')), false, k, false),
+            Some(Action::Quit)
+        );
+        // An unbound letter is absorbed — no leak into navigation.
+        assert_eq!(resolve(key(KeyCode::Char('z')), false, k, false), None);
+    }
+
+    #[test]
+    fn settings_edit_binds_only_commit_cancel_quit() {
+        let k = ModalKind::SettingsEdit;
+        assert_eq!(
+            resolve(key(KeyCode::Enter), false, k, false),
+            Some(Action::SettingsEditCommit)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Esc), false, k, false),
+            Some(Action::SettingsEditCancel)
+        );
+        assert_eq!(
+            resolve(ctrl(KeyCode::Char('c')), false, k, false),
+            Some(Action::Quit)
+        );
+        // Typing falls through to the buffer.
+        assert_eq!(resolve(key(KeyCode::Char('a')), false, k, false), None);
         assert_eq!(resolve(key(KeyCode::Backspace), false, k, false), None);
     }
 }
