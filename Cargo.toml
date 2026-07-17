@@ -12,8 +12,8 @@ edition = "2021"
 rust-version = "1.85"
 license = "MIT"
 authors = ["Codeoid <dev@codeoid.ai>"]
-repository = "https://github.com/saucam/codeoid-ui"
-homepage = "https://github.com/saucam/codeoid-ui"
+repository = "https://github.com/highflame-ai/codeoid-ui"
+homepage = "https://github.com/highflame-ai/codeoid-ui"
 keywords = ["codeoid", "claude", "tui", "ai-agents", "ratatui"]
 
 [workspace.dependencies]

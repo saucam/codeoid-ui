@@ -3,12 +3,12 @@
 [![crates.io](https://img.shields.io/crates/v/codeoid-tui?logo=rust&label=crates.io&color=dea584)](https://crates.io/crates/codeoid-tui)
 [![downloads](https://img.shields.io/crates/d/codeoid-tui?logo=rust&label=downloads&color=dea584)](https://crates.io/crates/codeoid-tui)
 [![docs.rs](https://img.shields.io/docsrs/codeoid-protocol?logo=docs.rs&label=docs.rs)](https://docs.rs/codeoid-protocol)
-[![CI](https://github.com/saucam/codeoid-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/saucam/codeoid-ui/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/saucam/codeoid-ui/branch/main/graph/badge.svg)](https://codecov.io/gh/saucam/codeoid-ui)
+[![CI](https://github.com/highflame-ai/codeoid-ui/actions/workflows/ci.yml/badge.svg)](https://github.com/highflame-ai/codeoid-ui/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/highflame-ai/codeoid-ui/branch/main/graph/badge.svg)](https://codecov.io/gh/highflame-ai/codeoid-ui)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![UI: Ratatui](https://img.shields.io/badge/TUI-Ratatui-success.svg)](https://ratatui.rs)
 
-Native terminal cockpit for the [**Codeoid**](https://github.com/saucam/codeoid)
+Native terminal cockpit for the [**Codeoid**](https://github.com/highflame-ai/codeoid)
 daemon — written in Rust + [Ratatui](https://ratatui.rs). Ships the `codeoid-tui`
 binary.
 
@@ -84,7 +84,7 @@ cargo install codeoid-tui
 This drops a `codeoid-tui` binary on your `PATH`. Everywhere below you can run
 `codeoid-tui` directly instead of `cargo run -p codeoid-tui --release`.
 
-**Prebuilt binaries** — each [GitHub Release](https://github.com/saucam/codeoid-ui/releases)
+**Prebuilt binaries** — each [GitHub Release](https://github.com/highflame-ai/codeoid-ui/releases)
 ships tarballs for Linux (`x86_64`) and macOS (Apple Silicon + Intel); download,
 extract, and drop `codeoid-tui` on your `PATH`.
 
@@ -171,6 +171,6 @@ PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). For vulnerabilities, see
 ---
 
 The daemon, web UI, and Telegram frontend live in
-[saucam/codeoid](https://github.com/saucam/codeoid). Powered by
+[highflame-ai/codeoid](https://github.com/highflame-ai/codeoid). Powered by
 [ZeroID](https://github.com/highflame-ai/zeroid) + the
 [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript).

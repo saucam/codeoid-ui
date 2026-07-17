@@ -2,14 +2,14 @@
 
 Thanks for helping improve the Codeoid terminal cockpit. This is the native
 Rust/[Ratatui](https://ratatui.rs) client for the
-[Codeoid](https://github.com/saucam/codeoid) daemon.
+[Codeoid](https://github.com/highflame-ai/codeoid) daemon.
 
 ## Workspace
 
 Three crates (see [README § Workspace layout](README.md#workspace-layout)):
 
 - `codeoid-protocol` — pure serde wire types, **no I/O**. Must stay in sync with
-  the daemon's `src/protocol/` in [saucam/codeoid](https://github.com/saucam/codeoid).
+  the daemon's `src/protocol/` in [highflame-ai/codeoid](https://github.com/highflame-ai/codeoid).
 - `codeoid-client` — async transport (tokio + tungstenite): connect, auth, reconnect.
 - `codeoid-tui` — the Ratatui app (Elm-style: one `AppEvent` → one `update()`).
 
@@ -45,7 +45,7 @@ A headless smoke client (no terminal) lives at
 
 The wire format is shared with the daemon. If you change `codeoid-protocol`,
 bump `PROTOCOL_VERSION` (`crates/codeoid-protocol/src/lib.rs`) and update the
-daemon's `src/protocol/` in [saucam/codeoid](https://github.com/saucam/codeoid)
+daemon's `src/protocol/` in [highflame-ai/codeoid](https://github.com/highflame-ai/codeoid)
 in lockstep. The protocol is additive-safe; a version mismatch warns rather than
 refuses.
 
@@ -59,3 +59,21 @@ refuses.
 
 By contributing you agree your contributions are licensed under the
 [MIT License](LICENSE).
+
+## Signing off your work (DCO)
+
+This project uses the [Developer Certificate of Origin](https://developercertificate.org/) (DCO) rather than a CLA — a lightweight, per-commit attestation that you wrote, or otherwise have the right to submit, the code you contribute.
+
+Sign off every commit:
+
+```bash
+git commit -s -m "your message"
+```
+
+That appends a trailer derived from your Git identity:
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
+
+By signing off you agree to the DCO (full text at <https://developercertificate.org/>). If a commit is missing the trailer, amend it with `git commit --amend -s` (or `git rebase --signoff` for a range) before pushing.
