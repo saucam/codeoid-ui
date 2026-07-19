@@ -291,6 +291,38 @@ pub struct SettingsSnapshot {
     pub secrets: HashMap<String, SecretStatus>,
     pub config_path: String,
     pub env_path: String,
+    /// Read-only registry MCP servers + live health (cross-backend mounter).
+    /// Absent from older daemons — defaults to empty so deserialization is
+    /// forward-compatible.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerStatus>,
+}
+
+/// Read-only status of one registry MCP server, mirrored from the TS protocol
+/// (`McpServerStatus`). Config comes from the daemon's registry; `health`/`tools`
+/// reflect what the daemon-owned client has observed so far (no live probe).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerStatus {
+    pub name: String,
+    /// "stdio" | "http" | "in-process".
+    pub transport: String,
+    /// "readonly" | "prompt".
+    pub trust: String,
+    /// "global" | "workspace" | "session".
+    pub scope: String,
+    /// Backends this server mounts on; `None` = all.
+    #[serde(default)]
+    pub backends: Option<Vec<String>>,
+    pub enabled: bool,
+    /// `codeoid_memory` — always present, not user-declared.
+    pub builtin: bool,
+    /// "connected" | "error" | "idle" | "disabled".
+    pub health: String,
+    pub tool_count: u32,
+    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

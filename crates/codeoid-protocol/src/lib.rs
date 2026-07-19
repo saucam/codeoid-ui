@@ -42,11 +42,11 @@ pub use client::{
 };
 pub use daemon::{
     AuthOkMsg, ClaudeConfigAgent, ClaudeConfigHook, ClaudeConfigMcpServer, ClaudeConfigScope,
-    ClaudeConfigSkill, DaemonMessage, ErrorCode, ModelInfo, ProviderCommand, SecretStatus,
-    SessionExportCounts, SessionExportManifest, SessionExportMetaSlim, SessionExportPayload,
-    SessionExportWorkdir, SessionSearchHit, SessionSearchSnippet, SessionUiRequestMsg,
-    SettingError, SettingField, SettingOption, SettingState, SettingsGroup, SettingsManifest,
-    SettingsSnapshot, SettingsTab, UiRequestMethod, UiResolvedReason,
+    ClaudeConfigSkill, DaemonMessage, ErrorCode, McpServerStatus, ModelInfo, ProviderCommand,
+    SecretStatus, SessionExportCounts, SessionExportManifest, SessionExportMetaSlim,
+    SessionExportPayload, SessionExportWorkdir, SessionSearchHit, SessionSearchSnippet,
+    SessionUiRequestMsg, SettingError, SettingField, SettingOption, SettingState, SettingsGroup,
+    SettingsManifest, SettingsSnapshot, SettingsTab, UiRequestMethod, UiResolvedReason,
 };
 pub use message::{
     ContentPart, IdentityType, MessageIdentity, MessageRole, SessionMessage, SessionMessageDelta,
