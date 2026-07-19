@@ -841,6 +841,18 @@ impl SettingsModal {
         self.manifest.as_ref().map_or(0, |m| m.tabs.len()) + usize::from(self.has_mcp_tab())
     }
 
+    /// Clamp the active tab into range after the tab set changes — e.g. the
+    /// synthetic MCP tab appears/disappears when a fresh snapshot arrives. Keeps
+    /// a stale out-of-range index (parked on the MCP tab, then servers vanish)
+    /// from leaving a blank body until the next tab keypress.
+    pub fn clamp_tab(&mut self) {
+        let n = self.tab_count();
+        if self.tab >= n {
+            self.tab = n.saturating_sub(1);
+            self.selected = 0;
+        }
+    }
+
     /// The field the cursor is on (cloned so callers avoid borrow conflicts).
     #[must_use]
     pub fn selected_field(&self) -> Option<codeoid_protocol::SettingField> {
@@ -1030,11 +1042,15 @@ mod tests {
         assert!(m.tab_fields().is_empty());
         assert!(m.selected_field().is_none());
 
-        // Empty server list → the tab disappears again.
+        // Parked on the MCP tab when it vanishes: the index is stale until a
+        // fresh snapshot triggers clamp_tab, which pulls it back into range.
         m.snapshot.as_mut().unwrap().mcp_servers.clear();
         assert!(!m.has_mcp_tab());
         assert_eq!(m.tab_count(), 1);
         assert!(!m.on_mcp_tab());
+        assert_eq!(m.tab, 1); // stale
+        m.clamp_tab();
+        assert_eq!(m.tab, 0); // clamped to the last manifest tab
     }
 
     #[test]
