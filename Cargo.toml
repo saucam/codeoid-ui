@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
@@ -18,8 +18,8 @@ keywords = ["codeoid", "claude", "tui", "ai-agents", "ratatui"]
 
 [workspace.dependencies]
 # Workspace-internal
-codeoid-protocol = { path = "crates/codeoid-protocol", version = "0.3.0" }
-codeoid-client   = { path = "crates/codeoid-client", version = "0.3.0" }
+codeoid-protocol = { path = "crates/codeoid-protocol", version = "0.4.0" }
+codeoid-client   = { path = "crates/codeoid-client", version = "0.4.0" }
 
 # Async runtime
 tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "io-std", "io-util"] }
