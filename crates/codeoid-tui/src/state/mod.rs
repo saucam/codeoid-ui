@@ -817,9 +817,40 @@ impl SettingsModal {
             .collect()
     }
 
+    /// True when the daemon reported registry MCP servers — surfaced as a
+    /// synthetic read-only tab appended after the manifest tabs.
+    #[must_use]
+    pub fn has_mcp_tab(&self) -> bool {
+        self.snapshot
+            .as_ref()
+            .is_some_and(|s| !s.mcp_servers.is_empty())
+    }
+
+    /// True when the synthetic MCP servers tab is the active tab.
+    #[must_use]
+    pub fn on_mcp_tab(&self) -> bool {
+        self.has_mcp_tab()
+            && self
+                .manifest
+                .as_ref()
+                .is_some_and(|m| self.tab == m.tabs.len())
+    }
+
     #[must_use]
     pub fn tab_count(&self) -> usize {
-        self.manifest.as_ref().map_or(0, |m| m.tabs.len())
+        self.manifest.as_ref().map_or(0, |m| m.tabs.len()) + usize::from(self.has_mcp_tab())
+    }
+
+    /// Clamp the active tab into range after the tab set changes — e.g. the
+    /// synthetic MCP tab appears/disappears when a fresh snapshot arrives. Keeps
+    /// a stale out-of-range index (parked on the MCP tab, then servers vanish)
+    /// from leaving a blank body until the next tab keypress.
+    pub fn clamp_tab(&mut self) {
+        let n = self.tab_count();
+        if self.tab >= n {
+            self.tab = n.saturating_sub(1);
+            self.selected = 0;
+        }
     }
 
     /// The field the cursor is on (cloned so callers avoid borrow conflicts).
@@ -962,6 +993,64 @@ mod tests {
         // Next bottom growth anchors again.
         state.note_total_rendered(210);
         assert_eq!(state.scroll_offset, 40);
+    }
+
+    #[test]
+    fn mcp_tab_is_appended_after_manifest_tabs_when_servers_exist() {
+        use codeoid_protocol::{McpServerStatus, SettingsManifest, SettingsSnapshot, SettingsTab};
+        let mut m = SettingsModal::new();
+        m.manifest = Some(SettingsManifest {
+            version: 1,
+            tabs: vec![SettingsTab {
+                id: "general".into(),
+                title: "General".into(),
+                icon: None,
+                description: None,
+                groups: vec![],
+            }],
+        });
+        // No snapshot → no synthetic MCP tab.
+        assert!(!m.has_mcp_tab());
+        assert_eq!(m.tab_count(), 1);
+
+        // Snapshot with a registry server → the MCP tab is appended.
+        m.snapshot = Some(SettingsSnapshot {
+            values: HashMap::new(),
+            secrets: HashMap::new(),
+            config_path: "c".into(),
+            env_path: "e".into(),
+            mcp_servers: vec![McpServerStatus {
+                name: "github".into(),
+                transport: "stdio".into(),
+                trust: "prompt".into(),
+                scope: "workspace".into(),
+                backends: None,
+                enabled: true,
+                builtin: false,
+                health: "idle".into(),
+                tool_count: 0,
+                tools: vec![],
+                error: None,
+            }],
+        });
+        assert!(m.has_mcp_tab());
+        assert_eq!(m.tab_count(), 2);
+
+        // The last tab is the MCP tab; it's read-only, so it has no fields.
+        m.tab = 1;
+        assert!(m.on_mcp_tab());
+        assert!(m.tab_fields().is_empty());
+        assert!(m.selected_field().is_none());
+
+        // Parked on the MCP tab when it vanishes: the index is stale until a
+        // fresh snapshot triggers clamp_tab, which pulls it back into range.
+        m.snapshot.as_mut().unwrap().mcp_servers.clear();
+        assert!(!m.has_mcp_tab());
+        assert_eq!(m.tab_count(), 1);
+        assert!(!m.on_mcp_tab());
+        assert_eq!(m.tab, 1); // stale
+        m.clamp_tab();
+        assert_eq!(m.tab, 0); // clamped to the last manifest tab
     }
 
     #[test]

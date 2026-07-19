@@ -1174,6 +1174,7 @@ impl App {
                 if let Some(Modal::Settings(m)) = state.modal.as_mut() {
                     if m.pending_get_id.as_deref() == Some(request_id.as_str()) {
                         m.snapshot = Some(snapshot);
+                        m.clamp_tab();
                         m.pending_get_id = None;
                         if m.manifest.is_some() {
                             m.loading = false;
@@ -1192,6 +1193,7 @@ impl App {
                     if m.pending_set_id.as_deref() == Some(request_id.as_str()) {
                         m.pending_set_id = None;
                         m.snapshot = Some(snapshot);
+                        m.clamp_tab();
                         if ok {
                             m.dirty.clear();
                             if restart_required {

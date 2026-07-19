@@ -73,6 +73,21 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, m: &SettingsModal) {
             pills.push(Span::styled(label, style));
             pills.push(Span::raw(" "));
         }
+        // Synthetic read-only tab for registry MCP servers (snapshot-backed,
+        // appended after the manifest tabs).
+        if m.has_mcp_tab() {
+            let active = m.tab == manifest.tabs.len();
+            let style = if active {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            pills.push(Span::styled(" 🔌 MCP Servers ".to_string(), style));
+            pills.push(Span::raw(" "));
+        }
         header_rows.push(Line::from(pills));
     } else if m.loading {
         header_rows.push(hint_line("loading…"));
@@ -89,7 +104,9 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, m: &SettingsModal) {
             Style::default().fg(Color::Red),
         )));
     }
-    if let Some(manifest) = &m.manifest {
+    if m.on_mcp_tab() {
+        body_rows.extend(mcp_server_rows(m));
+    } else if let Some(manifest) = &m.manifest {
         if let Some(tab) = manifest.tabs.get(m.tab) {
             if let Some(desc) = &tab.description {
                 body_rows.push(Line::from(Span::styled(
@@ -210,6 +227,81 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, m: &SettingsModal) {
         Paragraph::new(footer_rows).wrap(Wrap { trim: false }),
         chunks[2],
     );
+}
+
+/// Body rows for the synthetic MCP servers tab: each registry server with its
+/// health, transport/trust, tools, and any error. Read-only (no field editing).
+fn mcp_server_rows(m: &SettingsModal) -> Vec<Line<'static>> {
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    rows.push(Line::from(Span::styled(
+        "Registry MCP servers, mounted on every backend (config + imported from ~/.claude.json). Read-only.".to_string(),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    )));
+    rows.push(Line::raw(""));
+    let Some(snap) = &m.snapshot else {
+        return rows;
+    };
+    for s in &snap.mcp_servers {
+        let (hlabel, hcolor) = match s.health.as_str() {
+            "connected" => ("connected", Color::Green),
+            "error" => ("error", Color::Red),
+            "disabled" => ("disabled", Color::DarkGray),
+            _ => ("idle", Color::DarkGray),
+        };
+        let mut head: Vec<Span<'static>> = vec![Span::styled(
+            format!("● {}", s.name),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )];
+        if s.builtin {
+            head.push(Span::styled(
+                "  built-in".to_string(),
+                Style::default().fg(Color::Magenta),
+            ));
+        }
+        head.push(Span::raw("  "));
+        head.push(Span::styled(
+            format!("[{hlabel}]"),
+            Style::default().fg(hcolor),
+        ));
+        rows.push(Line::from(head));
+
+        let mut meta = format!("    {} · {}", s.transport, s.trust);
+        if s.tool_count > 0 {
+            let plural = if s.tool_count == 1 { "" } else { "s" };
+            meta.push_str(&format!(" · {} tool{plural}", s.tool_count));
+        }
+        rows.push(Line::from(Span::styled(
+            meta,
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        if let Some(err) = &s.error {
+            rows.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(err.clone(), Style::default().fg(Color::Red)),
+            ]));
+        }
+        if !s.tools.is_empty() {
+            rows.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled("tools: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(s.tools.join(", "), Style::default().fg(Color::Gray)),
+            ]));
+        }
+        if let Some(backends) = &s.backends {
+            rows.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled("backends: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(backends.join(", "), Style::default().fg(Color::Gray)),
+            ]));
+        }
+        rows.push(Line::raw(""));
+    }
+    rows
 }
 
 /// One field row: cursor + label + its current control state + badges.
@@ -991,6 +1083,71 @@ mod tests {
         assert!(text.contains("1. Allow"), "{text}");
         assert!(text.contains("▶ 2. Block"), "{text}");
         assert!(text.contains("Enter submit"), "{text}");
+    }
+
+    #[test]
+    fn settings_mcp_tab_renders_servers_with_health() {
+        use crate::state::SettingsModal;
+        use codeoid_protocol::{McpServerStatus, SettingsManifest, SettingsSnapshot, SettingsTab};
+
+        let mut m = SettingsModal::new();
+        m.loading = false;
+        m.manifest = Some(SettingsManifest {
+            version: 1,
+            tabs: vec![SettingsTab {
+                id: "general".into(),
+                title: "General".into(),
+                icon: None,
+                description: None,
+                groups: vec![],
+            }],
+        });
+        m.snapshot = Some(SettingsSnapshot {
+            values: std::collections::HashMap::new(),
+            secrets: std::collections::HashMap::new(),
+            config_path: "/c".into(),
+            env_path: "/e".into(),
+            mcp_servers: vec![
+                McpServerStatus {
+                    name: "codeoid_memory".into(),
+                    transport: "in-process".into(),
+                    trust: "readonly".into(),
+                    scope: "session".into(),
+                    backends: None,
+                    enabled: true,
+                    builtin: true,
+                    health: "connected".into(),
+                    tool_count: 2,
+                    tools: vec!["recall".into(), "get_episode".into()],
+                    error: None,
+                },
+                McpServerStatus {
+                    name: "github".into(),
+                    transport: "stdio".into(),
+                    trust: "prompt".into(),
+                    scope: "workspace".into(),
+                    backends: None,
+                    enabled: true,
+                    builtin: false,
+                    health: "idle".into(),
+                    tool_count: 0,
+                    tools: vec![],
+                    error: None,
+                },
+            ],
+        });
+        m.tab = 1; // the synthetic MCP tab (after the single manifest tab)
+        assert!(m.on_mcp_tab());
+
+        let mut state = mk_state();
+        state.modal = Some(Modal::Settings(m));
+        let text = render_to_text(&mut state);
+        assert!(text.contains("MCP Servers"), "{text}"); // header pill
+        assert!(text.contains("codeoid_memory"), "{text}");
+        assert!(text.contains("built-in"), "{text}");
+        assert!(text.contains("connected"), "{text}"); // health chip
+        assert!(text.contains("github"), "{text}");
+        assert!(text.contains("recall"), "{text}"); // tool list
     }
 
     #[test]
