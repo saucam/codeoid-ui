@@ -1086,6 +1086,71 @@ mod tests {
     }
 
     #[test]
+    fn settings_mcp_tab_renders_servers_with_health() {
+        use crate::state::SettingsModal;
+        use codeoid_protocol::{McpServerStatus, SettingsManifest, SettingsSnapshot, SettingsTab};
+
+        let mut m = SettingsModal::new();
+        m.loading = false;
+        m.manifest = Some(SettingsManifest {
+            version: 1,
+            tabs: vec![SettingsTab {
+                id: "general".into(),
+                title: "General".into(),
+                icon: None,
+                description: None,
+                groups: vec![],
+            }],
+        });
+        m.snapshot = Some(SettingsSnapshot {
+            values: std::collections::HashMap::new(),
+            secrets: std::collections::HashMap::new(),
+            config_path: "/c".into(),
+            env_path: "/e".into(),
+            mcp_servers: vec![
+                McpServerStatus {
+                    name: "codeoid_memory".into(),
+                    transport: "in-process".into(),
+                    trust: "readonly".into(),
+                    scope: "session".into(),
+                    backends: None,
+                    enabled: true,
+                    builtin: true,
+                    health: "connected".into(),
+                    tool_count: 2,
+                    tools: vec!["recall".into(), "get_episode".into()],
+                    error: None,
+                },
+                McpServerStatus {
+                    name: "github".into(),
+                    transport: "stdio".into(),
+                    trust: "prompt".into(),
+                    scope: "workspace".into(),
+                    backends: None,
+                    enabled: true,
+                    builtin: false,
+                    health: "idle".into(),
+                    tool_count: 0,
+                    tools: vec![],
+                    error: None,
+                },
+            ],
+        });
+        m.tab = 1; // the synthetic MCP tab (after the single manifest tab)
+        assert!(m.on_mcp_tab());
+
+        let mut state = mk_state();
+        state.modal = Some(Modal::Settings(m));
+        let text = render_to_text(&mut state);
+        assert!(text.contains("MCP Servers"), "{text}"); // header pill
+        assert!(text.contains("codeoid_memory"), "{text}");
+        assert!(text.contains("built-in"), "{text}");
+        assert!(text.contains("connected"), "{text}"); // health chip
+        assert!(text.contains("github"), "{text}");
+        assert!(text.contains("recall"), "{text}"); // tool list
+    }
+
+    #[test]
     fn confirm_dialog_renders_yn_hints_and_countdown_title() {
         let mut state = mk_state();
         let mut req = mk_request(UiRequestMethod::Confirm);
