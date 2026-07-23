@@ -12,7 +12,7 @@ jobs:
   # then creates the git tag + GitHub Release for the binary crate.
   release-plz-release:
     name: release-plz release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write # push tags + create the GitHub Release
     # Serialize: `release` does non-idempotent external writes (publish/tag),
@@ -40,7 +40,7 @@ jobs:
   # CHANGELOG based on the Conventional Commits since the last release.
   release-plz-pr:
     name: release-plz PR
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write # push the release-PR branch
       pull-requests: write # open / update the release PR
