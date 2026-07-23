@@ -41,7 +41,7 @@ cargo install codeoid-tui          # from crates.io
 - The **wire protocol** version (`PROTOCOL_VERSION` in `codeoid-protocol`) is
   independent of the crate version — bump it only on wire-breaking changes, and
   keep it in lockstep with the daemon's `src/protocol/types.ts` in
-  [codeoid](https://github.com/saucam/codeoid). The handshake negotiates
+  [codeoid](https://github.com/highflame-ai/codeoid). The handshake negotiates
   compatibility, so app versions and the protocol version move independently.
 - Both internal crates must be published before `codeoid-tui`; the workflow
   handles the ordering.

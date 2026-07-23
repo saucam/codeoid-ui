@@ -1,6 +1,6 @@
 # Security Policy
 
-codeoid-ui is a terminal client for the [Codeoid](https://github.com/saucam/codeoid)
+codeoid-ui is a terminal client for the [Codeoid](https://github.com/highflame-ai/codeoid)
 daemon. It holds credentials (a ZeroID API key or JWT) and connects to the
 daemon over WebSocket.
 
@@ -9,7 +9,7 @@ daemon over WebSocket.
 **Please do not open a public issue for security vulnerabilities.**
 
 Report privately via GitHub Security Advisories:
-<https://github.com/saucam/codeoid-ui/security/advisories/new>
+<https://github.com/highflame-ai/codeoid-ui/security/advisories/new>
 
 Include repro steps, affected commit, and impact. We'll acknowledge and
 coordinate a fix and disclosure with you.
@@ -28,7 +28,7 @@ coordinate a fix and disclosure with you.
   you set it. Avoid logging tokens; scrub before sharing a log capture.
 - **Scope of this client.** It enforces nothing itself — authorization is the
   daemon's job (per-message ZeroID scopes). Report daemon/auth issues against
-  [saucam/codeoid](https://github.com/saucam/codeoid).
+  [highflame-ai/codeoid](https://github.com/highflame-ai/codeoid).
 
 ## Supported versions
 
